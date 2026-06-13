@@ -174,7 +174,7 @@ async function dispatch(state: DaemonState, req: ControlRequest): Promise<Contro
       }
       const cfgPath = path.join(state.root, "mesh.toml");
       try {
-        const changed = await addPeerToConfig(cfgPath, { name, pubkey, address });
+        const changed = await addPeerToConfig(cfgPath, { name, pubkey, addresses: address ? [address] : [] });
         const next = await loadConfig(cfgPath);
         state.config = next;
         state.refreshPeers();
@@ -256,7 +256,7 @@ async function dispatch(state: DaemonState, req: ControlRequest): Promise<Contro
         await addPeerToConfig(cfgPath, {
           name: parsed.inviterName,
           pubkey: inviterPubkeyStr,
-          address: parsed.address,
+          addresses: [parsed.address],
         });
         const next = await loadConfig(cfgPath);
         state.config = next;
@@ -323,7 +323,7 @@ function peerSummaries(state: DaemonState, now: number): unknown[] {
         name: p.name,
         pubkey: p.pubkey,
         last_heartbeat_secs: last,
-        address: e?.address ?? null,
+        address: e?.addresses[0] ?? null,
         reachable: e?.isConnected() ?? false,
         config_hash_match:
           e?.lastConfigHash == null ? null : e.lastConfigHash === state.config.raw_hash,

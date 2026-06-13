@@ -162,18 +162,23 @@ async function postFrame(baseUrl: string, frame: Frame): Promise<boolean> {
 
 async function sendTo(state: DaemonState, peer: string, frame: Frame): Promise<void> {
   const entry = state.peers.get(peer);
-  const addr = entry?.address;
-  if (!addr) {
+  if (!entry || entry.addresses.length === 0) {
     state.enqueueFor(peer, frame);
     return;
   }
-  const { baseUrl } = normalizePeerUrl(addr, state.config.transport.tls);
-  const ok = await postFrame(baseUrl, frame);
-  if (ok) {
-    entry?.notePostOk();
-  } else {
-    state.enqueueFor(peer, frame);
+  for (const addr of entry.addresses) {
+    const { baseUrl } = normalizePeerUrl(addr, state.config.transport.tls);
+    const ok = await postFrame(baseUrl, frame);
+    if (ok) {
+      entry.notePostOk();
+      // Promote the working address to front for future sends.
+      if (entry.addAddress(addr)) {
+        await state.recordPeerAddress(peer, addr);
+      }
+      return;
+    }
   }
+  state.enqueueFor(peer, frame);
 }
 
 // ---------- retry loop ----------
@@ -207,26 +212,38 @@ export async function runRetryLoop(state: DaemonState): Promise<void> {
       }
 
       const entry = state.peers.get(peer);
-      const addr = entry?.address;
-      if (!addr) {
+      if (!entry || entry.addresses.length === 0) {
         for (const f of frames) state.enqueueFor(peer, f);
         continue;
       }
-      const { baseUrl } = normalizePeerUrl(addr, state.config.transport.tls);
 
-      let allOk = true;
-      for (let i = 0; i < frames.length; i++) {
-        const ok = await postFrame(baseUrl, frames[i]!);
-        if (!ok) {
-          allOk = false;
-          // Requeue the remainder.
-          for (let j = i; j < frames.length; j++) state.enqueueFor(peer, frames[j]!);
+      // Try each known address in order; on success promote it to front.
+      let remaining = frames;
+      let successAddr: string | null = null;
+      for (const addr of entry.addresses) {
+        const { baseUrl } = normalizePeerUrl(addr, state.config.transport.tls);
+        let i = 0;
+        for (; i < remaining.length; i++) {
+          const ok = await postFrame(baseUrl, remaining[i]!);
+          if (!ok) break;
+        }
+        if (i === remaining.length) {
+          successAddr = addr;
+          remaining = [];
           break;
         }
+        // This address failed at frame i; try next address from frame i onward.
+        remaining = remaining.slice(i);
       }
+      // Re-enqueue anything that couldn't be delivered.
+      for (const f of remaining) state.enqueueFor(peer, f);
+
       lastAttempt.set(peer, Date.now());
-      if (allOk) {
-        entry?.notePostOk();
+      if (successAddr !== null) {
+        entry.notePostOk();
+        if (entry.addAddress(successAddr)) {
+          await state.recordPeerAddress(peer, successAddr);
+        }
         backoffs.delete(peer);
       } else {
         const next = Math.min(Math.max(backoff, 1) * 2, RETRY_BACKOFF_MAX_SECS);

@@ -226,7 +226,7 @@ async function updateFromPeer(
 
 async function resolvePeerAddress(root: string, peer: PeerEntry): Promise<string | null> {
   const cache = await loadAddressCache(root);
-  return cache.addresses[peer.name] ?? peer.address ?? null;
+  return cache.addresses[peer.name]?.[0] ?? peer.addresses[0] ?? null;
 }
 
 // Peer addresses point at the gossip port (default 7979). serve-install-code

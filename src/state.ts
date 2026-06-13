@@ -35,7 +35,7 @@ export class RepoLocal {
 }
 
 export class PeerEntry {
-  address: string | null = null;
+  addresses: string[] = [];
   lastHeartbeat: number | null = null;
   lastPostOk: number | null = null;
   lastPostSeen: number | null = null;
@@ -51,15 +51,16 @@ export class PeerEntry {
   notePostSeen() {
     this.lastPostSeen = Date.now();
   }
-  setAddress(addr: string): boolean {
-    const changed = this.address !== addr;
-    this.address = addr;
-    return changed;
+  /** Prepend addr to the addresses list if it isn't already first. Returns true if changed. */
+  addAddress(addr: string): boolean {
+    if (this.addresses[0] === addr) return false;
+    this.addresses = [addr, ...this.addresses.filter((a) => a !== addr)];
+    return true;
   }
   noteHeartbeat(addr: string | null, cfgHash: string | null): boolean {
     this.lastHeartbeat = Date.now();
     let changed = false;
-    if (addr != null) changed = this.setAddress(addr);
+    if (addr != null) changed = this.addAddress(addr);
     if (cfgHash != null) this.lastConfigHash = cfgHash;
     return changed;
   }
@@ -115,8 +116,10 @@ export class DaemonState {
     for (const p of config.peers) {
       if (p.name === config.self.name) continue;
       const entry = new PeerEntry();
-      const addr = s.addressCache.addresses[p.name] ?? p.address;
-      if (addr) entry.address = addr;
+      // Merge: cached addresses first (most recently seen), then static config addresses.
+      const cached = s.addressCache.addresses[p.name] ?? [];
+      const merged = [...cached, ...p.addresses.filter((a) => !cached.includes(a))];
+      entry.addresses = merged;
       s.peers.set(p.name, entry);
     }
     for (const r of config.repos) {
@@ -139,8 +142,8 @@ export class DaemonState {
       if (p.name === this.config.self.name) continue;
       if (this.peers.has(p.name)) continue;
       const entry = new PeerEntry();
-      const addr = this.addressCache.addresses[p.name] ?? p.address;
-      if (addr) entry.address = addr;
+      const cached = this.addressCache.addresses[p.name] ?? [];
+      entry.addresses = [...cached, ...p.addresses.filter((a) => !cached.includes(a))];
       this.peers.set(p.name, entry);
     }
   }
@@ -157,8 +160,8 @@ export class DaemonState {
   async recordPeerAddress(peer: string, address: string): Promise<boolean> {
     const entry = this.peers.get(peer);
     if (!entry) return false;
-    if (!entry.setAddress(address)) return false;
-    this.addressCache.addresses[peer] = address;
+    if (!entry.addAddress(address)) return false;
+    this.addressCache.addresses[peer] = entry.addresses;
     try {
       await saveAddressCache(this.root, this.addressCache);
     } catch (e) {

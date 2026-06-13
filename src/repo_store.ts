@@ -102,10 +102,10 @@ export async function reconcileFromPeer(
   if (!(await exists(dir))) await git.initBare(dir);
 
   const peerEntry = state.peers.get(peer);
-  if (!peerEntry || !peerEntry.address) {
+  if (!peerEntry || peerEntry.addresses.length === 0) {
     throw new Error(`no address for peer ${peer}`);
   }
-  const { baseUrl } = normalizePeerUrl(peerEntry.address, state.config.transport.tls);
+  const { baseUrl } = normalizePeerUrl(peerEntry.addresses[0]!, state.config.transport.tls);
   const url = `${baseUrl}/${repo}.git`;
   const remotesRefspec = `+refs/heads/*:refs/remotes/${peer}/*`;
 

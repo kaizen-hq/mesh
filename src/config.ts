@@ -14,7 +14,7 @@ export interface SelfSection {
 export interface PeerEntry {
   name: string;
   pubkey: string;
-  address?: string;
+  addresses: string[];
 }
 
 export interface RepoEntry {
@@ -54,10 +54,16 @@ export async function loadConfig(file: string): Promise<Config> {
 
   const peers = ((t["peers"] as unknown[]) ?? []).map((p) => {
     const o = p as Record<string, unknown>;
+    // Accept both `address = "..."` (legacy) and `addresses = [...]` in TOML.
+    const addresses: string[] = Array.isArray(o.addresses)
+      ? o.addresses.filter((a): a is string => typeof a === "string")
+      : typeof o.address === "string"
+        ? [o.address]
+        : [];
     return {
       name: String(o.name),
       pubkey: String(o.pubkey),
-      address: typeof o.address === "string" ? o.address : undefined,
+      addresses,
     } satisfies PeerEntry;
   });
 
@@ -129,14 +135,27 @@ export async function addPeerToConfig(
       existing.pubkey = peer.pubkey;
       changed = true;
     }
-    if (peer.address && String(existing.address ?? "") !== peer.address) {
-      existing.address = peer.address;
-      changed = true;
+    if (peer.addresses.length > 0) {
+      const cur: string[] = Array.isArray(existing.addresses)
+        ? (existing.addresses as string[])
+        : typeof existing.address === "string"
+          ? [existing.address as string]
+          : [];
+      // Merge: prepend new addresses not already in the list.
+      const merged = [
+        ...peer.addresses.filter((a) => !cur.includes(a)),
+        ...cur,
+      ];
+      if (merged.length !== cur.length || merged.some((a, i) => a !== cur[i])) {
+        existing.addresses = merged;
+        delete existing.address;
+        changed = true;
+      }
     }
     if (!changed) return false;
   } else {
     const entry: Record<string, unknown> = { name: peer.name, pubkey: peer.pubkey };
-    if (peer.address) entry.address = peer.address;
+    if (peer.addresses.length > 0) entry.addresses = [...peer.addresses];
     doc.peers.push(entry);
   }
   await writeDocAtomic(file, doc);
@@ -182,7 +201,7 @@ export async function addRepoToConfig(
 // ---------- peer_addresses.toml ----------
 
 export interface AddressCache {
-  addresses: Record<string, string>;
+  addresses: Record<string, string[]>;
 }
 
 export function addressCachePath(root: string): string {
@@ -194,9 +213,11 @@ export async function loadAddressCache(root: string): Promise<AddressCache> {
     const raw = await fs.readFile(addressCachePath(root), "utf8");
     const t = toml.parse(raw) as Record<string, unknown>;
     const a = (t["addresses"] ?? {}) as Record<string, unknown>;
-    const addresses: Record<string, string> = {};
+    const addresses: Record<string, string[]> = {};
     for (const [k, v] of Object.entries(a)) {
-      if (typeof v === "string") addresses[k] = v;
+      // Accept both legacy single string and new array format.
+      if (typeof v === "string") addresses[k] = [v];
+      else if (Array.isArray(v)) addresses[k] = v.filter((x): x is string => typeof x === "string");
     }
     return { addresses };
   } catch (e: unknown) {

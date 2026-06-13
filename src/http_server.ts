@@ -49,7 +49,8 @@ export async function run(state: DaemonState, listen: string): Promise<ServerHan
     tlsOpts = { cert, key };
   }
 
-  const handler = (req: Request) => routeRequest(state, req);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const handler = (req: Request, srv: any) => routeRequest(state, req, srv);
 
   // Bun.serve types differ between versions; cast through unknown to silence.
   const serveOpts: Record<string, unknown> = {
@@ -86,7 +87,8 @@ function parseListen(listen: string): [string, string] {
   return [host, port];
 }
 
-async function routeRequest(state: DaemonState, req: Request): Promise<Response> {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function routeRequest(state: DaemonState, req: Request, server: any): Promise<Response> {
   const url = new URL(req.url);
   const path = url.pathname;
 
@@ -94,7 +96,7 @@ async function routeRequest(state: DaemonState, req: Request): Promise<Response>
     return handleStatus(state);
   }
   if (path === "/mesh/frame" && req.method === "POST") {
-    return handleFramePost(state, req);
+    return handleFramePost(state, req, server);
   }
   if (path === "/mesh/join" && req.method === "POST") {
     return handleJoinPost(state, req);
@@ -142,6 +144,7 @@ async function handleJoinPost(state: DaemonState, req: Request): Promise<Respons
     await addPeerToConfig(cfgPath, {
       name: verified.joinerName,
       pubkey: encodePubkey(verified.joinerPubkey),
+      addresses: [],
     });
     const next = await loadConfig(cfgPath);
     state.config = next;
@@ -167,7 +170,8 @@ function jsonResponse(status: number, body: unknown): Response {
 
 // ---------- POST /mesh/frame ----------
 
-async function handleFramePost(state: DaemonState, req: Request): Promise<Response> {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function handleFramePost(state: DaemonState, req: Request, server: any): Promise<Response> {
   const body = new Uint8Array(await req.arrayBuffer());
   let frame: Frame;
   try {
@@ -196,6 +200,27 @@ async function handleFramePost(state: DaemonState, req: Request): Promise<Respon
   }
 
   await peerLink.handleInboundFrame(state, frame.sender, msg);
+
+  // After verifying the frame is genuinely from `frame.sender`, record their
+  // source IP so we can reach them if all cached addresses have gone stale
+  // (e.g. they moved to a different network).
+  const sourceIp: string | undefined = server?.requestIP?.(req)?.address;
+  if (sourceIp) {
+    const peerAddresses = state.peers.get(frame.sender)?.addresses ?? [];
+    // Re-use the port from their most recently known address, falling back to
+    // the default peer port.  The TCP source port is ephemeral; what we want
+    // is the port they're listening on.
+    const fallbackPort = String(state.config.self.peer_port);
+    const knownPort =
+      peerAddresses.length > 0
+        ? (peerAddresses[0]!.split(":").at(-1) ?? fallbackPort)
+        : fallbackPort;
+    // Bracket IPv6 addresses so the result is a valid host:port string.
+    const host = sourceIp.includes(":") ? `[${sourceIp}]` : sourceIp;
+    const discovered = `${host}:${knownPort}`;
+    await state.recordPeerAddress(frame.sender, discovered);
+  }
+
   return new Response("", { status: 202 });
 }
 
@@ -295,7 +320,7 @@ function handleStatus(state: DaemonState): Response {
   for (const p of cfg.peers) {
     if (p.name === me) continue;
     const entry = state.peers.get(p.name);
-    const addr = entry?.address ?? "(no address)";
+    const addr = entry?.addresses[0] ?? "(no address)";
     const reachable = entry?.isConnected() ?? false;
     const hb = entry?.lastHeartbeat ? `${Math.floor((now - entry.lastHeartbeat) / 1000)}s ago` : "never";
     const drift =
