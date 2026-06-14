@@ -13,71 +13,142 @@ This was first built with Rust. But as an unsigned-compiled program, the company
 
 ## Install
 
+### From GitHub (recommended)
+
 ```sh
+curl -fsSL https://raw.githubusercontent.com/kaizen-hq/mesh/main/install.sh | bash
+```
+
+Installs the latest source from `main`. Requires `bun`, `unzip`, and `curl`.
+
+To install a specific release:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/kaizen-hq/mesh/main/install.sh | MESH_REF=v1.2.3 bash
+```
+
+After install, `mesh` is available at `~/.local/bin/mesh`. Make sure that directory is on your `PATH`:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"   # add to ~/.zshrc or ~/.bashrc
+```
+
+### From a teammate on the local network
+
+If a teammate already has mesh running, they can serve the installer directly:
+
+```sh
+# On the teammate's machine:
+mesh serve-install-code     # prints a curl line for you to run
+```
+
+This serves the same install flow over plain HTTP — no GitHub needed. Useful when you're on the same network and want the exact version your teammate is running.
+
+### From source
+
+```sh
+git clone git@github.com:kaizen-hq/mesh.git
 cd mesh
 bun install
 ```
 
 Requires Bun 1.1+. `git` and `openssl` (only for HTTPS mode) must be on `PATH`.
 
-## Use
-
-Identical commands to the Rust mesh:
+Run directly without compiling:
 
 ```sh
-bun src/main.ts init                       # generate identity, seed mesh.toml
-bun src/main.ts pubkey                     # share with teammates
-bun src/main.ts start                      # foreground server
-bun src/main.ts status                     # peers + repos + divergences
-bun src/main.ts add-address kyle 10.0.1.42:7979
-bun src/main.ts url webapp           # http://127.0.0.1:7979/webapp.git
+bun src/main.ts start
 ```
 
-Compile to a single binary so teammates don't need Bun installed at all:
+Or compile to a standalone binary (no Bun required on the target machine):
 
 ```sh
-bun build src/main.ts --compile --outfile mesh
+bun run build       # writes ./mesh
 ./mesh --help
 ```
 
-## Distributing source instead of a binary
-
-For teammates who'd rather run from source (more debuggable, hackable):
+## Use
 
 ```sh
-# package the source tree into mesh-src.zip in the repo root
-bun run package
-# or to a custom path:
-bun scripts/package.ts dist/mesh-src.zip
-
-# the same logic from the running CLI:
-mesh package                            # writes mesh-src.zip
-mesh package /tmp/build.zip             # custom output
+mesh init                              # generate identity, seed mesh.toml
+mesh pubkey                            # print your public key (share with teammates)
+mesh start                             # run the daemon in the foreground
+mesh status                            # show peers, repos, divergences
+mesh add-peer <name> <pubkey> [addr]   # manually add a peer
+mesh add-repo <name> <path>            # contribute a working copy
+mesh invite --addr HOST:PORT           # generate a one-time pairing token
+mesh join <token>                      # accept a pairing token
+mesh sync                              # force a reconciliation round
 ```
 
-The zip excludes `node_modules/`, `bun.lock`, the compiled `mesh` binary,
-and `.git/` — just source + `package.json` + `tsconfig.json` + `README.md` +
-`.gitignore`.
+## Releasing
 
-To hand it out over HTTP (parity with `serve-install` but for source):
+Releases follow semantic versioning with this convention:
+
+| Change type     | Version part bumped | Example |
+|-----------------|---------------------|---------|
+| Breaking change | Major (first)       | 1.0.0 → 2.0.0 |
+| Fix             | Minor (second)      | 1.0.0 → 1.1.0 |
+| Regular build   | Patch (third)       | 1.0.0 → 1.0.1 |
+
+### Commit message format
+
+Use conventional commit prefixes so the release script can detect the bump type automatically:
+
+```
+fix: correct retry backoff after address change       → fix (minor bump)
+fix!: change wire protocol frame encoding             → breaking (major bump)
+feat!: drop support for legacy bincode format         → breaking (major bump)
+add invite expiry warning to status output            → build (patch bump)
+```
+
+### Cutting a release
+
+1. **Write commits** using the prefixes above.
+
+2. **Run the release script:**
+   ```sh
+   bun run release
+   ```
+   This scans commits since the last tag, picks the bump type, updates `package.json`, commits `release vX.Y.Z`, and creates the git tag. Nothing is pushed yet.
+
+   To preview without making any changes:
+   ```sh
+   bun run release --dry-run
+   ```
+
+   To override the auto-detected bump type:
+   ```sh
+   bun run release breaking
+   bun run release fix
+   bun run release build
+   ```
+
+3. **Review, then push:**
+   ```sh
+   git push && git push --tags
+   ```
+   Pushing the tag triggers the GitHub Actions release workflow, which validates the tag matches `package.json`, builds `mesh-src.zip`, and publishes a GitHub Release with it as a downloadable asset.
+
+## Distributing source to teammates
 
 ```sh
-mesh serve-install-code                 # plain HTTP on 0.0.0.0:8001
-# prints the curl line teammates run.
+# Serve the installer over the local network:
+mesh serve-install-code                 # plain HTTP, prints the curl line
+
+# Or just build the zip manually:
+bun run package                         # writes mesh-src.zip to repo root
 ```
 
-The handler:
+The `serve-install-code` handler serves:
 
-- `GET /install.sh` — installer script. Verifies bun/unzip/git, downloads
-  `mesh-src.zip`, unpacks to `~/.local/share/mesh/`, runs `bun install`,
-  and writes a shim at `~/.local/bin/mesh` that does
-  `exec bun ~/.local/share/mesh/src/main.ts "$@"`.
-- `GET /mesh-src.zip` — the zip. Rebuilt every 60 seconds while the server
-  runs, so source edits get picked up without restarting.
-- `GET /` — friendly index that prints the curl line.
-
-After install, teammates run `mesh init && mesh pubkey && mesh start`
-exactly as if they had the compiled binary.
+- `GET /install.sh` — installs bun/unzip/git, downloads the zip, unpacks to
+  `~/.local/share/mesh/`, runs `bun install`, and writes a shim at
+  `~/.local/bin/mesh`.
+- `GET /mesh-src.zip` — the source zip, rebuilt every 60 seconds so edits are
+  picked up without restarting.
+- `GET /mesh-src.zip.sig` — ed25519 signature of the zip (for `mesh update-code`).
+- `GET /version` — JSON with version, sha256, and signature.
 
 ## License
 

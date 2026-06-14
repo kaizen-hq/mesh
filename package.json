@@ -12,7 +12,9 @@
     "typecheck": "tsc --noEmit",
     "build": "bun build src/main.ts --compile --outfile mesh",
     "package": "bun scripts/package.ts",
-    "release": "bun scripts/release.ts"
+    "release": "bun scripts/release.ts",
+    "release:fix": "bun scripts/release.ts fix",
+    "release:breaking": "bun scripts/release.ts breaking"
   },
   "dependencies": {
     "@noble/ed25519": "^2.2.3",
