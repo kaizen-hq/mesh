@@ -40,6 +40,7 @@ export class PeerEntry {
   lastPostOk: number | null = null;
   lastPostSeen: number | null = null;
   lastConfigHash: string | null = null;
+  lastIssueSyncMs: number | null = null; // epoch ms of last successful issue full-sync pull
 
   isConnected(): boolean {
     const recent = (t: number | null) => t != null && Date.now() - t < 60_000;
@@ -100,6 +101,10 @@ export class DaemonState {
   // nonce-hex → invite metadata; populated by `mesh invite` and consumed by
   // POST /mesh/join when a joiner presents the matching nonce.
   pendingInvites: Map<string, PendingInvite> = new Map();
+  // Callbacks invoked when local issue state changes (SSE notification, etc.)
+  issueChangedCallbacks: Array<(repo: string) => void> = [];
+  // Callbacks invoked when peer/repo status changes (SSE notification, etc.)
+  statusChangedCallbacks: Array<() => void> = [];
   private shutdownResolve: (() => void) | null = null;
   private shutdownPromise: Promise<void>;
 
@@ -168,6 +173,14 @@ export class DaemonState {
       console.warn("failed to persist address cache:", e);
     }
     return true;
+  }
+
+  notifyIssueChanged(repo: string): void {
+    for (const cb of this.issueChangedCallbacks) cb(repo);
+  }
+
+  notifyStatusChanged(): void {
+    for (const cb of this.statusChangedCallbacks) cb();
   }
 
   signalShutdown() {

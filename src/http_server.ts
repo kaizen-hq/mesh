@@ -24,6 +24,33 @@ import {
 } from "./invite.ts";
 import { addPeerToConfig, loadConfig } from "./config.ts";
 import { ensureSelfSignedCert, defaultSanConfig } from "./tls.ts";
+import * as issues from "./issues.ts";
+import type { IssueEvent } from "./proto.ts";
+
+// ---------- SSE client registries ----------
+
+// repo name → set of send-functions for active issue SSE connections
+const issueSseClients = new Map<string, Set<() => void>>();
+
+function subscribeIssueEvents(repo: string, send: () => void): () => void {
+  let clients = issueSseClients.get(repo);
+  if (!clients) { clients = new Set(); issueSseClients.set(repo, clients); }
+  clients.add(send);
+  return () => clients!.delete(send);
+}
+
+function notifyIssueChanged(repo: string): void {
+  const clients = issueSseClients.get(repo);
+  if (!clients) return;
+  for (const send of clients) send();
+}
+
+// status SSE clients
+const statusSseClients = new Set<() => void>();
+
+function notifyStatusChanged(): void {
+  for (const send of statusSseClients) send();
+}
 
 export interface ServerHandle {
   stop(): Promise<void>;
@@ -57,6 +84,7 @@ export async function run(state: DaemonState, listen: string): Promise<ServerHan
     hostname: host,
     port,
     fetch: handler,
+    idleTimeout: 0,
     error(err: Error) {
       console.error("server error:", err);
       return new Response(`error: ${err.message}`, { status: 500 });
@@ -69,6 +97,10 @@ export async function run(state: DaemonState, listen: string): Promise<ServerHan
   console.log(
     `mesh HTTP server listening at ${useTls ? "https" : "http"}://${host}:${port}`,
   );
+
+  // Wire SSE notifications so incoming frames trigger live updates
+  state.issueChangedCallbacks.push((repo) => notifyIssueChanged(repo));
+  state.statusChangedCallbacks.push(() => notifyStatusChanged());
 
   return {
     async stop() {
@@ -95,11 +127,27 @@ async function routeRequest(state: DaemonState, req: Request, server: any): Prom
   if (path === "/status" || path === "/") {
     return handleStatus(state);
   }
+  if (path === "/status/events" && req.method === "GET") {
+    return handleStatusEvents();
+  }
+  if (path === "/status/fragment" && req.method === "GET") {
+    return handleStatusFragment(state);
+  }
   if (path === "/mesh/frame" && req.method === "POST") {
     return handleFramePost(state, req, server);
   }
   if (path === "/mesh/join" && req.method === "POST") {
     return handleJoinPost(state, req);
+  }
+  // Issue sync endpoint: /mesh/issues/:repo/all
+  const issueSyncMatch = /^\/mesh\/issues\/([^/]+)\/all$/.exec(path);
+  if (issueSyncMatch && req.method === "GET") {
+    return handleIssueAll(state, issueSyncMatch[1]!);
+  }
+  // Issues board: /repos/:name/issues[/...]
+  const issueMatch = /^\/repos\/([^/]+)\/issues(\/.*)?$/.exec(path);
+  if (issueMatch) {
+    return handleIssues(state, req, decodeURIComponent(issueMatch[1]!), issueMatch[2] ?? "");
   }
   // git smart-HTTP
   return handleGit(state, req, url);
@@ -309,11 +357,9 @@ async function handleGit(state: DaemonState, req: Request, url: URL): Promise<Re
 
 // ---------- GET /status ----------
 
-function handleStatus(state: DaemonState): Response {
+function renderStatusData(state: DaemonState): string {
   const cfg = state.config;
   const me = cfg.self.name;
-  const myPub = state.identity.pubkeyString;
-  const scheme = cfg.transport.tls ? "https" : "http";
   const now = Date.now();
 
   let peerRows = "";
@@ -324,25 +370,20 @@ function handleStatus(state: DaemonState): Response {
     const reachable = entry?.isConnected() ?? false;
     const hb = entry?.lastHeartbeat ? `${Math.floor((now - entry.lastHeartbeat) / 1000)}s ago` : "never";
     const drift =
-      entry?.lastConfigHash == null
-        ? "?"
-        : entry.lastConfigHash === cfg.raw_hash
-          ? "ok"
-          : "DRIFT";
+      entry?.lastConfigHash == null ? "?"
+      : entry.lastConfigHash === cfg.raw_hash ? "ok"
+      : "DRIFT";
     const cls = reachable ? "ok" : "down";
     const lbl = reachable ? "up" : "down";
     peerRows += `<tr><td>${esc(p.name)}</td><td>${esc(addr)}</td><td><span class="${cls}">${lbl}</span></td><td>${esc(hb)}</td><td>${drift}</td></tr>`;
   }
-  if (!peerRows) {
-    peerRows = `<tr><td colspan="5"><em>(no peers configured)</em></td></tr>`;
-  }
+  if (!peerRows) peerRows = `<tr><td colspan="5"><em>(no peers configured)</em></td></tr>`;
 
   const contributed = new Set(cfg.repos.map((r) => r.name));
   const allNames = new Set<string>([...contributed]);
   for (const k of state.repos.keys()) allNames.add(k);
-  const sortedNames = [...allNames].sort();
   let repoRows = "";
-  for (const name of sortedNames) {
+  for (const name of [...allNames].sort()) {
     const local = state.repos.get(name);
     const head = local?.lastHead?.slice(0, 10) ?? "(empty)";
     const lf = local?.lastFetch ? `${Math.floor((now - local.lastFetch) / 1000)}s ago` : "never";
@@ -350,20 +391,78 @@ function handleStatus(state: DaemonState): Response {
     const kind = contributed.has(name) ? "ours" : "mirror";
     const divCount = local?.divergenceList().length ?? 0;
     const divCell = divCount > 0 ? `<span class="down">${divCount}</span>` : "0";
-    repoRows += `<tr><td>${esc(name)}</td><td>${kind}</td><td><code>${esc(head)}</code></td><td>${esc(lf)}</td><td>${esc(sources)}</td><td>${divCell}</td></tr>`;
+    repoRows += `<tr><td><a href="/repos/${esc(name)}/issues">${esc(name)}</a></td><td>${kind}</td><td><code>${esc(head)}</code></td><td>${esc(lf)}</td><td>${esc(sources)}</td><td>${divCell}</td></tr>`;
   }
-  if (!repoRows) {
-    repoRows = `<tr><td colspan="6"><em>(no repos)</em></td></tr>`;
-  }
+  if (!repoRows) repoRows = `<tr><td colspan="6"><em>(no repos)</em></td></tr>`;
 
+  return `<div id="status-data">
+<h2>peers</h2>
+<table>
+  <thead><tr><th>name</th><th>address</th><th>status</th><th>last heartbeat</th><th>config</th></tr></thead>
+  <tbody>${peerRows}</tbody>
+</table>
+<h2>repos</h2>
+<table>
+  <thead><tr><th>name</th><th>kind</th><th>head</th><th>last reconcile</th><th>sources</th><th>divergent</th></tr></thead>
+  <tbody>${repoRows}</tbody>
+</table>
+</div>`;
+}
+
+function handleStatusFragment(state: DaemonState): Response {
+  return new Response(renderStatusData(state), {
+    status: 200,
+    headers: { "content-type": "text/html; charset=utf-8" },
+  });
+}
+
+function handleStatusEvents(): Response {
+  const encoder = new TextEncoder();
+  let unsub: (() => void) | undefined;
+  let pingTimer: ReturnType<typeof setInterval> | undefined;
+
+  const stream = new ReadableStream({
+    start(controller) {
+      const send = () => {
+        try { controller.enqueue(encoder.encode("event: status-changed\ndata: {}\n\n")); }
+        catch { /* client disconnected */ }
+      };
+      statusSseClients.add(send);
+      unsub = () => statusSseClients.delete(send);
+      pingTimer = setInterval(() => {
+        try { controller.enqueue(encoder.encode(": ping\n\n")); }
+        catch { clearInterval(pingTimer); }
+      }, 25_000);
+      controller.enqueue(encoder.encode(": connected\n\n"));
+    },
+    cancel() {
+      unsub?.();
+      clearInterval(pingTimer);
+    },
+  });
+
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+    },
+  });
+}
+
+function handleStatus(state: DaemonState): Response {
+  const cfg = state.config;
+  const me = cfg.self.name;
+  const myPub = state.identity.pubkeyString;
+  const scheme = cfg.transport.tls ? "https" : "http";
   const pubShort = myPub.startsWith("ed25519:") ? myPub.slice(8, 20) : myPub.slice(0, 12);
   const cfgShort = cfg.raw_hash.slice(0, 10);
 
   const html = `<!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<meta http-equiv="refresh" content="5" />
+<meta charset="utf-8">
 <title>mesh status — ${esc(me)}</title>
 <style>
   body { font: 14px/1.5 -apple-system, BlinkMacSystemFont, system-ui, sans-serif; max-width: 920px; margin: 2rem auto; padding: 0 1rem; color: #1d1f22; }
@@ -386,19 +485,21 @@ function handleStatus(state: DaemonState): Response {
   pubkey <code>ed25519:${esc(pubShort)}…</code> &middot; listening <code>${scheme}</code> &middot; config hash <code>${esc(cfgShort)}</code>
 </div>
 
-<h2>peers</h2>
-<table>
-  <thead><tr><th>name</th><th>address</th><th>status</th><th>last heartbeat</th><th>config</th></tr></thead>
-  <tbody>${peerRows}</tbody>
-</table>
+${renderStatusData(state)}
 
-<h2>repos</h2>
-<table>
-  <thead><tr><th>name</th><th>kind</th><th>head</th><th>last reconcile</th><th>sources</th><th>divergent</th></tr></thead>
-  <tbody>${repoRows}</tbody>
-</table>
+<footer><code>GET /status</code> &middot; built on Bun</footer>
 
-<footer>auto-refresh every 5s — <code>GET /status</code> &middot; built on Bun</footer>
+<script>
+const es = new EventSource('/status/events');
+es.addEventListener('status-changed', async () => {
+  try {
+    const html = await fetch('/status/fragment').then(r => r.text());
+    const tmp = document.createElement('div');
+    tmp.innerHTML = html;
+    document.getElementById('status-data').replaceWith(tmp.firstElementChild);
+  } catch {}
+});
+</script>
 </body>
 </html>`;
   return new Response(html, {
@@ -418,4 +519,614 @@ function esc(s: string): string {
 
 function textResponse(status: number, body: string): Response {
   return new Response(body, { status, headers: { "content-type": "text/plain" } });
+}
+
+// ---------- Issues ----------
+
+function authorShort(state: DaemonState): string {
+  const pub = state.identity.pubkeyString;
+  return pub.startsWith("ed25519:") ? pub.slice(8, 14) : pub.slice(0, 6);
+}
+
+async function handleIssues(
+  state: DaemonState,
+  req: Request,
+  repo: string,
+  tail: string,
+): Promise<Response> {
+  const method = req.method;
+
+  if (tail === "" || tail === "/") {
+    if (method === "GET") return handleIssueBoard(state, repo);
+    if (method === "POST") return handleIssueCreate(state, req, repo);
+  }
+  if (tail === "/events" && method === "GET") {
+    return handleIssueEvents(repo);
+  }
+  if (tail === "/board" && method === "GET") {
+    return handleIssueBoardFragment(state, repo);
+  }
+  const actionMatch = /^\/([^/]+)\/(comment|status|order)$/.exec(tail);
+  if (actionMatch && method === "POST") {
+    const id = decodeURIComponent(actionMatch[1]!);
+    const action = actionMatch[2] as "comment" | "status" | "order";
+    if (action === "comment") return handleIssueComment(state, req, repo, id);
+    if (action === "status") return handleIssueStatus(state, req, repo, id);
+    return handleIssueOrder(state, req, repo, id);
+  }
+  return textResponse(404, "not found");
+}
+
+async function handleIssueAll(state: DaemonState, repo: string): Promise<Response> {
+  const wire = await issues.listIssuesAsWire(state.root, repo);
+  return new Response(JSON.stringify(wire), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+async function handleIssueBoard(state: DaemonState, repo: string): Promise<Response> {
+  const all = await issues.listIssues(state.root, repo);
+  return new Response(renderBoardPage(state, repo, all), {
+    status: 200,
+    headers: { "content-type": "text/html; charset=utf-8" },
+  });
+}
+
+async function handleIssueBoardFragment(state: DaemonState, repo: string): Promise<Response> {
+  const all = await issues.listIssues(state.root, repo);
+  return new Response(renderBoardGridForRepo(all, repo), {
+    status: 200,
+    headers: { "content-type": "text/html; charset=utf-8" },
+  });
+}
+
+async function handleIssueCreate(
+  state: DaemonState,
+  req: Request,
+  repo: string,
+): Promise<Response> {
+  let form;
+  try { form = await req.formData(); } catch {
+    return textResponse(400, "expected form body");
+  }
+  const title = (form.get("title") ?? "").toString().trim();
+  if (!title) return textResponse(400, "title is required");
+  const body = (form.get("body") ?? "").toString().trim();
+  const labelsRaw = (form.get("labels") ?? "").toString();
+  const labels = labelsRaw.split(",").map((l) => l.trim()).filter(Boolean);
+  const author = authorShort(state);
+
+  const issue = await issues.createIssue(state.root, repo, author, title, body, labels);
+  const event: IssueEvent = {
+    type: "IssueCreated",
+    repo,
+    id: issue.meta.id,
+    title: issue.meta.title,
+    body: issue.body,
+    labels: issue.meta.labels,
+    author: issue.meta.author,
+    created: issue.meta.created,
+  };
+  peerLink.broadcastIssueEvent(state, event);
+  notifyIssueChanged(repo);
+  return new Response("", { status: 303, headers: { Location: `/repos/${repo}/issues` } });
+}
+
+async function handleIssueComment(
+  state: DaemonState,
+  req: Request,
+  repo: string,
+  id: string,
+): Promise<Response> {
+  let form;
+  try { form = await req.formData(); } catch {
+    return textResponse(400, "expected form body");
+  }
+  const body = (form.get("body") ?? "").toString().trim();
+  if (!body) return new Response("", { status: 303, headers: { Location: `/repos/${repo}/issues#${id}` } });
+  const author = authorShort(state);
+
+  let result: { created: string };
+  try {
+    result = await issues.addComment(state.root, repo, id, author, body);
+  } catch (e) {
+    return textResponse(404, (e as Error).message);
+  }
+  const event: IssueEvent = { type: "IssueCommented", repo, id, author, created: result.created, body };
+  peerLink.broadcastIssueEvent(state, event);
+  notifyIssueChanged(repo);
+  return new Response("", { status: 303, headers: { Location: `/repos/${repo}/issues#${id}` } });
+}
+
+async function handleIssueStatus(
+  state: DaemonState,
+  req: Request,
+  repo: string,
+  id: string,
+): Promise<Response> {
+  let form;
+  try { form = await req.formData(); } catch {
+    return textResponse(400, "expected form body");
+  }
+  const status = (form.get("status") ?? "").toString() as issues.IssueStatus;
+  if (status !== "open" && status !== "closed" && status !== "trashed") return textResponse(400, "invalid status");
+  const author = authorShort(state);
+  const updated = new Date().toISOString();
+
+  try {
+    await issues.setStatus(state.root, repo, id, status, updated);
+  } catch (e) {
+    return textResponse(404, (e as Error).message);
+  }
+  const event: IssueEvent = { type: "IssueStatusChanged", repo, id, status, author, updated };
+  peerLink.broadcastIssueEvent(state, event);
+  notifyIssueChanged(repo);
+  // Trash uses fetch (no page reload); done/reopen use a plain form POST (redirect back).
+  if (status === "trashed") return new Response("", { status: 200 });
+  return new Response("", { status: 303, headers: { Location: `/repos/${repo}/issues` } });
+}
+
+async function handleIssueOrder(
+  state: DaemonState,
+  req: Request,
+  repo: string,
+  id: string,
+): Promise<Response> {
+  let form;
+  try { form = await req.formData(); } catch {
+    return textResponse(400, "expected form body");
+  }
+  const order = parseFloat((form.get("order") ?? "").toString());
+  if (isNaN(order)) return textResponse(400, "invalid order");
+
+  try {
+    await issues.setOrder(state.root, repo, id, order);
+  } catch (e) {
+    return textResponse(404, (e as Error).message);
+  }
+  const event: IssueEvent = { type: "IssueReordered", repo, id, order };
+  peerLink.broadcastIssueEvent(state, event);
+  notifyIssueChanged(repo);
+  return new Response("", { status: 200 });
+}
+
+function handleIssueEvents(repo: string): Response {
+  const encoder = new TextEncoder();
+  let unsub: (() => void) | undefined;
+  let pingTimer: ReturnType<typeof setInterval> | undefined;
+
+  const stream = new ReadableStream({
+    start(controller) {
+      const send = () => {
+        try {
+          controller.enqueue(encoder.encode("event: board-changed\ndata: {}\n\n"));
+        } catch { /* client disconnected */ }
+      };
+      unsub = subscribeIssueEvents(repo, send);
+      // keep-alive ping every 25s to prevent proxy timeouts
+      pingTimer = setInterval(() => {
+        try { controller.enqueue(encoder.encode(": ping\n\n")); } catch { clearInterval(pingTimer); }
+      }, 25_000);
+      // initial confirmation
+      controller.enqueue(encoder.encode(": connected\n\n"));
+    },
+    cancel() {
+      unsub?.();
+      clearInterval(pingTimer);
+    },
+  });
+
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+    },
+  });
+}
+
+// ---------- Board HTML rendering ----------
+
+const LABEL_COLORS = [
+  { bg: "#dbeafe", dot: "#2563eb" }, // blue
+  { bg: "#fce7f3", dot: "#db2777" }, // pink
+  { bg: "#d1fae5", dot: "#059669" }, // green
+  { bg: "#fef3c7", dot: "#d97706" }, // yellow
+  { bg: "#ede9fe", dot: "#7c3aed" }, // purple
+  { bg: "#fee2e2", dot: "#dc2626" }, // red
+  { bg: "#e0f2fe", dot: "#0284c7" }, // sky
+];
+
+function labelColor(label: string): { bg: string; dot: string } {
+  let h = 0;
+  for (let i = 0; i < label.length; i++) h = (Math.imul(h, 31) + label.charCodeAt(i)) | 0;
+  return LABEL_COLORS[Math.abs(h) % LABEL_COLORS.length]!;
+}
+
+function relativeAge(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime();
+  const m = Math.floor(diff / 60_000);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(diff / 3_600_000);
+  if (h < 24) return `${h}h`;
+  const d = Math.floor(diff / 86_400_000);
+  if (d < 14) return `${d}d`;
+  return `${Math.floor(d / 7)}w`;
+}
+
+function isStale(iso: string): boolean {
+  return Date.now() - new Date(iso).getTime() > 14 * 86_400_000;
+}
+
+function textPreview(md: string, max = 140): string {
+  return md
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/\*([^*]+)\*/g, "$1")
+    .replace(/`[^`]+`/g, "")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/\n+/g, " ")
+    .trim()
+    .slice(0, max);
+}
+
+function renderMarkdown(md: string): string {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const bunMd = (Bun as any).markdown;
+  if (bunMd?.html) {
+    try {
+      return bunMd.html(md, { tables: true, strikethrough: true, tasklists: true }) as string;
+    } catch { /* fall through */ }
+  }
+  // Fallback: paragraph-split and HTML-escape
+  return md.split(/\n\n+/).map((p) => `<p>${esc(p.trim())}</p>`).join("\n");
+}
+
+function renderLabelDots(labels: string[]): string {
+  if (!labels.length) return "";
+  return labels
+    .map((l) => {
+      const c = labelColor(l);
+      return `<span class="dot" style="background:${c.dot}"></span><span>${esc(l)}</span>`;
+    })
+    .join(" ");
+}
+
+function renderCard(issue: issues.Issue, repo: string): string {
+  const { meta, body, comments } = issue;
+  const firstLabel = meta.labels[0];
+  const cardBg = firstLabel ? labelColor(firstLabel).bg : "#f8f9fa";
+  const staleClass = isStale(meta.created) ? " stale" : "";
+  const age = relativeAge(meta.created);
+  const replyText =
+    comments.length === 0 ? "" :
+    comments.length === 1 ? " &middot; 1 reply" :
+    ` &middot; ${comments.length} replies`;
+  const statusVal = meta.status === "open" ? "closed" : "open";
+  const actionLabel = meta.status === "open" ? "done" : "reopen";
+  const preview = esc(textPreview(body));
+
+  const commentsHtml = comments.length
+    ? `<div class="comments">${comments.map((c) => `
+        <div class="comment">
+          <div class="comment-meta">${esc(c.author)} &middot; ${relativeAge(c.created)}</div>
+          <div class="comment-body">${renderMarkdown(c.body)}</div>
+        </div>`).join("")}
+      </div>`
+    : "";
+
+  return `
+<article class="card${staleClass}" draggable="true" data-id="${esc(meta.id)}" data-status="${meta.status}" data-labels="${esc(meta.labels.join(","))}" data-order="${meta.order}" style="--card-tint:${cardBg}" id="${esc(meta.id)}">
+  <header class="card-header" onclick="toggleCard('${esc(meta.id)}')">
+    <div class="card-labels">${renderLabelDots(meta.labels)}</div>
+    <h3 class="card-title">${esc(meta.title)}</h3>
+    ${preview ? `<p class="card-preview">${preview}</p>` : ""}
+  </header>
+  <footer class="card-footer">
+    <span class="card-meta">${age}${replyText}</span>
+    <form method="POST" action="/repos/${esc(repo)}/issues/${esc(meta.id)}/status">
+      <input type="hidden" name="status" value="${statusVal}">
+      <button class="btn-action" type="submit">${actionLabel}</button>
+    </form>
+  </footer>
+  <div class="card-detail" hidden>
+    <div class="card-body">${renderMarkdown(body)}</div>
+    ${commentsHtml}
+    <form class="reply-form" method="POST" action="/repos/${esc(repo)}/issues/${esc(meta.id)}/comment">
+      <textarea name="body" placeholder="add a reply..." rows="3"></textarea>
+      <button class="btn-action" type="submit">reply</button>
+    </form>
+    <div class="card-danger">
+      <button class="btn-trash" type="button" onclick="trashCard('${esc(meta.id)}', '${esc(repo)}')">trash</button>
+    </div>
+  </div>
+</article>`;
+}
+
+function renderBoardGridForRepo(all: issues.Issue[], repo: string): string {
+  const cards = all.map((issue) => renderCard(issue, repo)).join("\n");
+  return `<div id="board" class="board">
+${cards}
+<article class="card card-new">
+  <form method="POST" action="/repos/${esc(repo)}/issues">
+    <input type="text" name="title" placeholder="title" required autocomplete="off">
+    <textarea name="body" placeholder="describe the issue..." rows="3"></textarea>
+    <div class="new-footer">
+      <input type="text" name="labels" placeholder="labels, comma-separated" class="new-labels">
+      <button class="btn-action" type="submit">post</button>
+    </div>
+  </form>
+</article>
+</div>`;
+}
+
+function collectLabels(all: issues.Issue[]): string[] {
+  const seen = new Set<string>();
+  for (const issue of all) for (const l of issue.meta.labels) seen.add(l);
+  return [...seen].sort();
+}
+
+function renderBoardPage(state: DaemonState, repo: string, all: issues.Issue[]): string {
+  const me = state.config.self.name;
+  const labels = collectLabels(all);
+
+  const chipHtml = labels.map((l) => {
+    const c = labelColor(l);
+    return `<button class="chip" data-label-chip="${esc(l)}" onclick="toggleLabel('${esc(l)}')" type="button"><span class="dot" style="background:${c.dot}"></span>${esc(l)}</button>`;
+  }).join("\n");
+
+  const filterRow = labels.length
+    ? `<div class="board-filters">\n${chipHtml}\n</div>`
+    : "";
+
+  const boardGrid = renderBoardGridForRepo(all, repo);
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>issues — ${esc(repo)} — ${esc(me)}</title>
+<style>
+  body { font: 14px/1.5 -apple-system, BlinkMacSystemFont, system-ui, sans-serif; max-width: 1080px; margin: 2rem auto; padding: 0 1rem; color: #1d1f22; }
+  a { color: inherit; }
+  h1 { margin: 0 0 1.5rem; font-size: 1.1rem; font-weight: 400; }
+  h1 strong { font-weight: 700; }
+
+  /* filters */
+  .board-filters { display: flex; gap: .4rem; flex-wrap: wrap; margin-bottom: 1rem; align-items: center; }
+  .chip { background: #f0f0f0; border: 1px solid #ddd; border-radius: 12px; padding: 2px 10px; font-size: 11px; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; color: #555; font-family: inherit; }
+  .chip.active { background: #1d1f22; color: #fff; border-color: #1d1f22; }
+  .chip .dot { flex-shrink: 0; }
+  #show-closed-btn { margin-left: auto; }
+
+  /* board grid */
+  .board { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: .75rem; align-items: start; }
+
+  /* cards */
+  .card { background: var(--card-tint, #f8f9fa); border: 1px solid rgba(0,0,0,0.1); border-radius: 3px; display: flex; flex-direction: column; overflow: hidden; transition: opacity .2s; }
+  .card.stale { opacity: .7; }
+  .card[data-status="closed"] { opacity: .4; border-style: dashed; }
+  .card-header { padding: .75rem .75rem .5rem; cursor: pointer; flex: 1; }
+  .card-header:hover { background: rgba(0,0,0,0.03); }
+  .card-labels { display: flex; align-items: center; gap: .4rem; font-size: 11px; color: #555; margin-bottom: .4rem; flex-wrap: wrap; min-height: 1rem; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .card-title { margin: 0 0 .35rem; font-size: .9rem; font-weight: 600; line-height: 1.3; }
+  .card-preview { margin: 0; font-size: 12px; color: #666; line-height: 1.4; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .card-footer { display: flex; align-items: center; justify-content: space-between; padding: .4rem .75rem; border-top: 1px solid rgba(0,0,0,0.07); background: rgba(0,0,0,0.02); }
+  .card-meta { font-size: 11px; color: #999; }
+  .btn-action { background: none; border: 1px solid #ddd; border-radius: 3px; padding: 2px 8px; font-size: 11px; cursor: pointer; color: #666; font-family: inherit; }
+  .btn-action:hover { background: rgba(0,0,0,0.05); border-color: #bbb; }
+
+  /* expanded detail */
+  .card-detail { padding: .75rem; border-top: 1px solid rgba(0,0,0,0.08); font-size: 13px; }
+  .card-body { line-height: 1.6; }
+  .card-body p { margin: 0 0 .5rem; }
+  .card-body p:last-child { margin-bottom: 0; }
+  .comments { margin-top: .75rem; }
+  .comment { border-top: 1px solid rgba(0,0,0,0.07); padding-top: .5rem; margin-top: .5rem; }
+  .comment-meta { font-size: 11px; color: #999; margin-bottom: .25rem; }
+  .comment-body { font-size: 12.5px; line-height: 1.5; }
+  .comment-body p { margin: 0 0 .35rem; }
+  .reply-form { margin-top: .75rem; display: flex; flex-direction: column; gap: .4rem; }
+  .reply-form textarea { font-family: inherit; font-size: 12.5px; padding: .4rem; border: 1px solid #ddd; border-radius: 3px; resize: vertical; width: 100%; box-sizing: border-box; }
+  .reply-form button { align-self: flex-end; }
+
+  /* new issue card */
+  .card-new { background: #fff; border: 1px dashed #ccc; }
+  .card-new form { padding: .75rem; display: flex; flex-direction: column; gap: .5rem; }
+  .card-new input, .card-new textarea { font-family: inherit; font-size: 13px; border: none; border-bottom: 1px solid #eee; padding: .3rem 0; outline: none; background: transparent; width: 100%; box-sizing: border-box; }
+  .card-new input:focus, .card-new textarea:focus { border-bottom-color: #aaa; }
+  .card-new input::placeholder, .card-new textarea::placeholder { color: #ccc; }
+  .card-new textarea { resize: none; }
+  .new-footer { display: flex; justify-content: space-between; align-items: center; gap: .5rem; }
+  .new-labels { font-size: 11px !important; }
+
+  /* trash */
+  .card-danger { margin-top: .75rem; padding-top: .5rem; border-top: 1px solid rgba(0,0,0,0.07); display: flex; justify-content: flex-end; }
+  .btn-trash { background: none; border: 1px solid #f5c2c2; border-radius: 3px; padding: 2px 8px; font-size: 11px; cursor: pointer; color: #c0392b; font-family: inherit; }
+  .btn-trash:hover { background: #fdf2f2; border-color: #c0392b; }
+
+  /* drag-and-drop reorder */
+  .card[draggable="true"] { cursor: grab; }
+  .card[draggable="true"]:active { cursor: grabbing; }
+  .card.drag-over { outline: 2px solid #1d1f22; outline-offset: 2px; }
+  .card.dragging { opacity: .35; }
+
+  footer { margin-top: 2rem; color: #888; font-size: 12px; }
+</style>
+</head>
+<body>
+<h1><a href="/status">${esc(me)}</a> / <a href="/repos/${esc(repo)}/issues"><strong>${esc(repo)}</strong> issues</a></h1>
+
+<div class="board-filters">
+${chipHtml}
+<button class="chip" id="show-closed-btn" onclick="toggleClosed()" type="button">show closed</button>
+</div>
+
+${boardGrid}
+
+<footer><a href="/status">mesh status</a> &middot; built on Bun</footer>
+
+<script>
+const active = new Set();
+let showClosed = localStorage.getItem('showClosed') === 'true';
+let opened = null;
+
+function applyFilters() {
+  document.querySelectorAll('.card[data-id]').forEach(c => {
+    const labels = c.dataset.labels ? c.dataset.labels.split(',').filter(Boolean) : [];
+    const trashed = c.dataset.status === 'trashed';
+    const statusOk = !trashed && (showClosed || c.dataset.status !== 'closed');
+    const labelOk = active.size === 0 || labels.some(l => active.has(l));
+    c.style.display = (statusOk && labelOk) ? '' : 'none';
+  });
+}
+
+function toggleLabel(l) {
+  active.has(l) ? active.delete(l) : active.add(l);
+  document.querySelectorAll('[data-label-chip]').forEach(c => {
+    c.classList.toggle('active', active.has(c.dataset.labelChip));
+  });
+  applyFilters();
+}
+
+function toggleClosed() {
+  showClosed = !showClosed;
+  localStorage.setItem('showClosed', showClosed);
+  document.getElementById('show-closed-btn').classList.toggle('active', showClosed);
+  applyFilters();
+}
+
+async function trashCard(id, repo) {
+  const form = new FormData();
+  form.set('status', 'trashed');
+  try {
+    await fetch('/repos/' + encodeURIComponent(repo) + '/issues/' + encodeURIComponent(id) + '/status', {
+      method: 'POST', body: form
+    });
+    const card = document.getElementById(id);
+    if (card) card.style.display = 'none';
+  } catch {}
+}
+
+function toggleCard(id) {
+  const prev = opened;
+  if (prev) {
+    const prevDetail = document.querySelector('[data-id="' + prev + '"] .card-detail');
+    if (prevDetail) prevDetail.hidden = true;
+    opened = null;
+  }
+  if (prev !== id) {
+    const detail = document.querySelector('[data-id="' + id + '"] .card-detail');
+    if (detail) { detail.hidden = false; opened = id; }
+  }
+}
+
+// Restore show-closed state on load
+document.getElementById('show-closed-btn').classList.toggle('active', showClosed);
+applyFilters();
+
+// Auto-expand card from URL hash (e.g. after adding a comment)
+if (location.hash) toggleCard(location.hash.slice(1));
+
+// SSE: refresh board grid when issues change
+const es = new EventSource(location.pathname + '/events');
+es.addEventListener('board-changed', async () => {
+  try {
+    const html = await fetch(location.pathname + '/board').then(r => r.text());
+    const tmp = document.createElement('div');
+    tmp.innerHTML = html;
+    const next = tmp.firstElementChild;
+    if (next) document.getElementById('board').replaceWith(next);
+    if (opened) {
+      const d = document.querySelector('[data-id="' + opened + '"] .card-detail');
+      if (d) d.hidden = false;
+    }
+    applyFilters();
+  } catch {}
+});
+
+// Drag-and-drop priority reorder
+let dragSrc = null;
+
+document.addEventListener('dragstart', e => {
+  const card = e.target.closest('.card[data-id]');
+  if (!card) return;
+  dragSrc = card;
+  card.classList.add('dragging');
+  e.dataTransfer.effectAllowed = 'move';
+});
+
+document.addEventListener('dragend', e => {
+  const card = e.target.closest('.card[data-id]');
+  if (card) card.classList.remove('dragging');
+  document.querySelectorAll('.drag-over').forEach(c => c.classList.remove('drag-over'));
+  dragSrc = null;
+});
+
+document.addEventListener('dragover', e => {
+  const card = e.target.closest('.card[data-id]');
+  if (!card || card === dragSrc) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+  document.querySelectorAll('.drag-over').forEach(c => c.classList.remove('drag-over'));
+  card.classList.add('drag-over');
+});
+
+document.addEventListener('dragleave', e => {
+  const card = e.target.closest('.card[data-id]');
+  if (card) card.classList.remove('drag-over');
+});
+
+document.addEventListener('drop', async e => {
+  const target = e.target.closest('.card[data-id]');
+  if (!target || !dragSrc || target === dragSrc) return;
+  e.preventDefault();
+  target.classList.remove('drag-over');
+
+  const board = document.getElementById('board');
+  const allCards = [...board.querySelectorAll('.card[data-id]')];
+  const srcIdx = allCards.indexOf(dragSrc);
+  const tgtIdx = allCards.indexOf(target);
+
+  // Dragging forward → insert after target; dragging backward → insert before
+  const insertAfter = srcIdx < tgtIdx;
+
+  // Cards without dragSrc, in their current order
+  const cards = allCards.filter(c => c !== dragSrc);
+  const ti = cards.indexOf(target);
+
+  let prevOrder, nextOrder, newOrder;
+  if (insertAfter) {
+    prevOrder = parseFloat(target.dataset.order || '0');
+    const nextCard = cards[ti + 1];
+    nextOrder = nextCard ? parseFloat(nextCard.dataset.order || String(Date.now() + 1e9)) : prevOrder + 1e9;
+    newOrder = (prevOrder + nextOrder) / 2;
+    const anchor = nextCard || board.querySelector('.card-new') || null;
+    board.insertBefore(dragSrc, anchor);
+  } else {
+    nextOrder = parseFloat(target.dataset.order || String(Date.now() + 1e9));
+    const prevCard = cards[ti - 1];
+    prevOrder = prevCard ? parseFloat(prevCard.dataset.order || '0') : nextOrder - 1e9;
+    newOrder = (prevOrder + nextOrder) / 2;
+    board.insertBefore(dragSrc, target);
+  }
+
+  dragSrc.dataset.order = String(newOrder);
+
+  // Persist to server
+  const id = dragSrc.dataset.id;
+  const form = new FormData();
+  form.set('order', String(newOrder));
+  try {
+    await fetch(location.pathname + '/' + encodeURIComponent(id) + '/order', {
+      method: 'POST', body: form
+    });
+  } catch {}
+});
+</script>
+</body>
+</html>`;
 }

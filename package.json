@@ -9,6 +9,7 @@
   },
   "scripts": {
     "start": "bun src/main.ts start",
+    "dev": "bun --watch src/main.ts start",
     "typecheck": "tsc --noEmit",
     "build": "bun build src/main.ts --compile --outfile mesh",
     "package": "bun scripts/package.ts",

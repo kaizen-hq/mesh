@@ -11,9 +11,11 @@ import {
   type Message,
   type RefChange,
   type RepoStatus,
+  type IssueEvent,
 } from "./proto.ts";
 import * as repoStore from "./repo_store.ts";
 import * as git from "./git.ts";
+import * as issues from "./issues.ts";
 
 const HTTP_TIMEOUT_MS = 10_000;
 const RETRY_TICK_SECS = 2;
@@ -38,10 +40,22 @@ export async function handleInboundFrame(
         state.ensureRepo(r.name).noteSource(sender);
       }
       scheduleReconcileIfStale(state, sender, msg.repos);
+      scheduleIssueSyncIfStale(state, sender, msg.repos);
+      state.notifyStatusChanged();
       break;
     case "RefUpdate":
       // run async; do not block the HTTP handler
       void handleInboundRefUpdate(state, sender, msg.repo, msg.refs);
+      break;
+    case "IssueEvent":
+      void (async () => {
+        try {
+          await issues.applyIssueEvent(state.root, msg.event);
+          state.notifyIssueChanged(msg.event.repo);
+        } catch (e) {
+          console.warn(`apply IssueEvent failed (repo=${msg.event.repo}):`, (e as Error).message);
+        }
+      })();
       break;
   }
 }
@@ -89,6 +103,7 @@ async function handleInboundRefUpdate(
   const head = await git.headSha(dir);
   if (head) local.lastHead = head;
   local.lastFetch = Date.now();
+  state.notifyStatusChanged();
 }
 
 function scheduleReconcileIfStale(
@@ -333,4 +348,83 @@ export function broadcastRefUpdate(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((res) => setTimeout(res, ms));
+}
+
+// ---------- issue event broadcast ----------
+
+export function broadcastIssueEvent(state: DaemonState, event: IssueEvent): void {
+  void (async () => {
+    const me = state.config.self.name;
+    for (const p of state.config.peers) {
+      if (p.name === me) continue;
+      const msg: Message = { kind: "IssueEvent", event };
+      try {
+        const frame = await signFrame(me, p.name, msg, state.identity.privateKey);
+        await sendTo(state, p.name, frame);
+      } catch (e) {
+        console.debug(`IssueEvent broadcast to ${p.name} failed:`, (e as Error).message);
+      }
+    }
+  })();
+}
+
+// ---------- issue full sync (pull) ----------
+
+export async function pullIssuesFromPeer(
+  state: DaemonState,
+  peer: string,
+  repo: string,
+): Promise<void> {
+  const entry = state.peers.get(peer);
+  if (!entry || entry.addresses.length === 0) return;
+
+  for (const addr of entry.addresses) {
+    const { baseUrl } = normalizePeerUrl(addr, state.config.transport.tls);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
+    const init: RequestInit & { tls?: { rejectUnauthorized: boolean } } = {
+      signal: controller.signal,
+      tls: { rejectUnauthorized: false },
+    };
+    try {
+      const resp = await fetch(
+        `${baseUrl}/mesh/issues/${encodeURIComponent(repo)}/all`,
+        init,
+      );
+      if (!resp.ok) continue;
+      const peerIssues = (await resp.json()) as issues.IssueWire[];
+      await issues.mergeFromPeer(state.root, repo, peerIssues);
+      state.notifyIssueChanged(repo);
+      return;
+    } catch (e) {
+      console.debug(`issue pull ${peer}/${repo} at ${addr} failed:`, (e as Error).message);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+}
+
+function scheduleIssueSyncIfStale(
+  state: DaemonState,
+  peer: string,
+  advertised: RepoStatus[],
+): void {
+  const entry = state.peers.get(peer);
+  if (!entry) return;
+  const now = Date.now();
+  // Throttle: only pull once per minute per peer
+  if (entry.lastIssueSyncMs !== null && now - entry.lastIssueSyncMs < 60_000) return;
+
+  void (async () => {
+    const ourRepos = new Set(state.repos.keys());
+    for (const r of advertised) {
+      if (!ourRepos.has(r.name)) continue;
+      try {
+        await pullIssuesFromPeer(state, peer, r.name);
+      } catch (e) {
+        console.debug(`issue sync ${peer}/${r.name} failed:`, (e as Error).message);
+      }
+    }
+    entry.lastIssueSyncMs = now;
+  })();
 }

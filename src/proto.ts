@@ -1,8 +1,8 @@
-// Wire-compatible protocol with the Rust mesh implementation.
+// mesh wire protocol.
 //
-// Frames use bincode binary encoding so a mesh peer can talk to a mesh
-// (Rust) peer transparently. ed25519 signatures cover the same byte sequence
-// the Rust version signs: sender || 0 || dest || 0 || payload.
+// Frames use bincode encoding. ed25519 signatures cover:
+// sender || 0 || dest || 0 || payload.
+// Issue message variants (tag >= 3) carry a JSON-encoded payload string.
 
 import * as ed from "@noble/ed25519";
 
@@ -139,6 +139,44 @@ export interface RefChange {
   new_sha: string;
 }
 
+// ---------- issue wire events ----------
+
+export type IssueEvent =
+  | {
+      type: "IssueCreated";
+      repo: string;
+      id: string;
+      title: string;
+      body: string;
+      labels: string[];
+      author: string;
+      created: string;
+    }
+  | {
+      type: "IssueCommented";
+      repo: string;
+      id: string;
+      author: string;
+      created: string;
+      body: string;
+    }
+  | {
+      type: "IssueStatusChanged";
+      repo: string;
+      id: string;
+      status: "open" | "closed" | "trashed";
+      author: string;
+      updated: string;
+    }
+  | {
+      type: "IssueReordered";
+      repo: string;
+      id: string;
+      order: number;
+    };
+
+// ---------- message union ----------
+
 export type Message =
   | {
       kind: "Hello";
@@ -156,6 +194,10 @@ export type Message =
       kind: "RefUpdate";
       repo: string;
       refs: RefChange[];
+    }
+  | {
+      kind: "IssueEvent";
+      event: IssueEvent;
     };
 
 // ---------- encode / decode Message (bincode-compatible) ----------
@@ -200,6 +242,10 @@ function encodeMessage(msg: Message): Uint8Array {
         e.str(c.new_sha);
       }
       break;
+    case "IssueEvent":
+      e.variant(3);
+      e.str(JSON.stringify(msg.event));
+      break;
   }
   return e.finish();
 }
@@ -240,6 +286,10 @@ function decodeMessage(buf: Uint8Array): Message {
         refs.push({ name: d.str(), old_sha: d.str(), new_sha: d.str() });
       }
       return { kind: "RefUpdate", repo, refs };
+    }
+    case 3: {
+      const event = JSON.parse(d.str()) as IssueEvent;
+      return { kind: "IssueEvent", event };
     }
     default:
       throw new Error(`unknown Message variant tag: ${tag}`);
