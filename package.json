@@ -17,9 +17,7 @@
     "release:fix": "bun scripts/release.ts fix",
     "release:breaking": "bun scripts/release.ts breaking"
   },
-  "dependencies": {
-    "smol-toml": "^1.3.1"
-  },
+  "dependencies": {},
   "devDependencies": {
     "@types/bun": "latest",
     "typescript": "^5.6.0"

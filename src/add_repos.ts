@@ -5,7 +5,7 @@
 import * as path from "node:path";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
-import * as toml from "smol-toml";
+import * as toml from "./toml.ts";
 
 const SKIP_DIRS = new Set(["node_modules", ".git"]);
 

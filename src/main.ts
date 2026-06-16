@@ -4,7 +4,7 @@
 import * as path from "node:path";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
-import * as toml from "smol-toml";
+import * as toml from "./toml.ts";
 import { defaultRoot, DaemonState } from "./state.ts";
 import { loadConfig, seedConfig } from "./config.ts";
 import { loadOrCreate } from "./identity.ts";

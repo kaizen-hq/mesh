@@ -3,7 +3,7 @@
 
 import * as path from "node:path";
 import * as fs from "node:fs/promises";
-import * as toml from "smol-toml";
+import * as toml from "./toml.ts";
 import { sha256Hex } from "./proto.ts";
 
 export interface SelfSection {
