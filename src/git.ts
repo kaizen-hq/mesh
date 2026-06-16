@@ -1,5 +1,5 @@
-// Subprocess wrappers for git. Mirrors src/git.rs in the Rust mesh:
-// shells out to git-upload-pack / git-receive-pack with --stateless-rpc, and
+// Subprocess wrappers for git — shells out to git-upload-pack / git-receive-pack
+// with --stateless-rpc and
 // wraps the smart-HTTP pkt-line framing ourselves (cleaner than git http-backend).
 
 import * as path from "node:path";

@@ -1,5 +1,5 @@
 // Unix-domain socket at ~/.mesh/sock that the CLI subcommands talk to.
-// Wire-compatible with the Rust mesh: newline-delimited JSON.
+// Protocol: newline-delimited JSON.
 
 import * as path from "node:path";
 import * as fs from "node:fs/promises";

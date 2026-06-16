@@ -1,8 +1,7 @@
 // Identity: ed25519 signing keypair + self-signed TLS cert (HTTPS mode only).
 //
-// Files in ~/.mesh/ (shared layout with the Rust mesh):
-//   keys/daemon.ed25519       — PKCS#8 PEM (preferred, what Rust ed25519-dalek
-//                                writes; also legacy 32-byte raw seed accepted)
+// Files in ~/.mesh/:
+//   keys/daemon.ed25519       — PKCS#8 PEM (also accepts legacy 32-byte raw seed)
 //   keys/daemon.ed25519.pub   — public key as "ed25519:<base64>\n"
 //   tls/cert.pem              — ECDSA P-256 self-signed cert (HTTPS mode)
 //   tls/key.pem               — matching key (mode 0600)
@@ -33,7 +32,7 @@ export async function loadOrCreate(root: string): Promise<Identity> {
   } catch (e: unknown) {
     if (!isNotFound(e)) throw e;
     seed = crypto.getRandomValues(new Uint8Array(32));
-    // Write as PKCS#8 PEM so the Rust mesh can read this file too.
+    // Write as PKCS#8 PEM (standard format, interoperable).
     await fs.writeFile(seedPath, encodePkcs8Pem(seed), { mode: 0o600 });
   }
 
@@ -88,11 +87,8 @@ function isNotFound(e: unknown): boolean {
 
 // ---------- PKCS#8 PEM for ed25519 ----------
 //
-// Wire-compatible with the Rust mesh, which uses `ed25519-dalek` + the
-// `pkcs8` feature to write keys. ed25519-dalek emits PKCS#8 v2 (DER includes
-// the public key in a trailing context-specific [1] tag); we accept v1 or v2
-// on read and emit v1 (48-byte DER) on write — both are valid PKCS#8 and
-// `ed25519-dalek` parses both transparently.
+// We write PKCS#8 v1 (48-byte DER) and accept v1 or v2 on read. v2 includes
+// the public key in a trailing context-specific [1] tag; both are valid PKCS#8.
 //
 // DER layout (v1):
 //   30 2e               SEQUENCE, 46 bytes

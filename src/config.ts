@@ -1,5 +1,5 @@
 // mesh.toml parsing + peer_addresses.toml parsing + URL helpers.
-// Shape matches the Rust mesh exactly so users can share configs.
+// mesh.toml and peer_addresses.toml are the canonical config format.
 
 import * as path from "node:path";
 import * as fs from "node:fs/promises";
