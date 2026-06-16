@@ -8,7 +8,7 @@
 // its own mesh.toml. After this round-trip both sides know each other and
 // the normal heartbeat/RefUpdate path takes over.
 
-import * as ed from "@noble/ed25519";
+import * as ed from "./ed25519.ts";
 import {
   base64Encode,
   base64Decode,

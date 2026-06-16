@@ -3,7 +3,7 @@
 
 import * as fs from "node:fs/promises";
 import * as dgram from "node:dgram";
-import * as ed from "@noble/ed25519";
+import * as ed from "./ed25519.ts";
 import { loadOrCreate } from "./identity.ts";
 import { sha256Hex, base64Encode } from "./proto.ts";
 import pkg from "../package.json" with { type: "json" };

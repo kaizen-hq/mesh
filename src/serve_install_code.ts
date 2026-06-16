@@ -5,7 +5,7 @@
 // prefer to run from `bun` directly.
 
 import * as dgram from "node:dgram";
-import * as ed from "@noble/ed25519";
+import * as ed from "./ed25519.ts";
 import { buildZipBytes, isCompiledBinary } from "./package_source.ts";
 import { loadOrCreate } from "./identity.ts";
 import { sha256Hex, base64Encode } from "./proto.ts";

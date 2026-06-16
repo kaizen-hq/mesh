@@ -14,7 +14,7 @@
 import * as path from "node:path";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
-import * as ed from "@noble/ed25519";
+import * as ed from "./ed25519.ts";
 import { loadConfig, normalizePeerUrl, findRepo, loadAddressCache } from "./config.ts";
 import type { Config, PeerEntry } from "./config.ts";
 import { decodePubkey } from "./proto.ts";

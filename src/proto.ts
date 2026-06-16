@@ -4,7 +4,7 @@
 // sender || 0 || dest || 0 || payload.
 // Issue message variants (tag >= 3) carry a JSON-encoded payload string.
 
-import * as ed from "@noble/ed25519";
+import * as ed from "./ed25519.ts";
 
 // noble/ed25519 v2 async API uses WebCrypto for sha512 — no setup needed.
 // Sync API (sign/verify) requires `etc.sha512Sync` wiring; we use async APIs
@@ -406,13 +406,10 @@ export function decodePubkey(s: string): Uint8Array {
 
 // ---------- sha256 hex (used for config_hash) ----------
 
-import { sha256 } from "@noble/hashes/sha2";
-
 export function sha256Hex(data: Uint8Array): string {
-  const h = sha256(data);
-  return Array.from(h)
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+  const h = new Bun.CryptoHasher("sha256");
+  h.update(data);
+  return h.digest("hex");
 }
 
 // ---------- base64 helpers (Bun-compatible) ----------

@@ -9,7 +9,7 @@
 
 import * as path from "node:path";
 import * as fs from "node:fs/promises";
-import * as ed from "@noble/ed25519";
+import * as ed from "./ed25519.ts";
 import { encodePubkey } from "./proto.ts";
 
 export interface Identity {
