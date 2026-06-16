@@ -45,10 +45,7 @@ export async function loadOrCreate(root: string): Promise<Identity> {
     // non-fatal
   }
 
-  // TLS cert generation is skipped here — generating an ECDSA P-256 cert in
-  // pure JS without a heavy crypto package is out of scope. When the Bun
-  // server runs in HTTPS mode, we'll generate the cert lazily using a small
-  // subprocess shell-out to `openssl` if/when needed.
+  // TLS cert is generated lazily in ensureTlsCert() using node:crypto (SubtleCrypto).
   let certPem: string | null = null;
   let keyPem: string | null = null;
   try {
@@ -63,8 +60,7 @@ export async function loadOrCreate(root: string): Promise<Identity> {
 
 /**
  * Ensure a self-signed ECDSA P-256 TLS cert exists at `~/.mesh/tls/{cert,key}.pem`.
- * Shells out to `openssl req` because there's no good pure-JS option that
- * matches what macOS git's LibreSSL accepts. Idempotent.
+ * Uses SubtleCrypto (crypto.subtle) — no openssl subprocess required. Idempotent.
  */
 export async function ensureTlsCert(root: string): Promise<{ cert: string; key: string }> {
   const certPath = path.join(root, "tls", "cert.pem");
@@ -78,58 +74,9 @@ export async function ensureTlsCert(root: string): Promise<{ cert: string; key: 
   }
 
   await fs.mkdir(path.join(root, "tls"), { recursive: true });
-  const proc = Bun.spawn(
-    [
-      "openssl",
-      "req",
-      "-x509",
-      "-newkey",
-      "ec:<(openssl ecparam -name prime256v1)>",
-      "-keyout",
-      keyPath,
-      "-out",
-      certPath,
-      "-days",
-      "3650",
-      "-nodes",
-      "-subj",
-      "/CN=mesh.local",
-    ],
-    { stdout: "pipe", stderr: "pipe" },
-  );
-  await proc.exited;
-  if (proc.exitCode !== 0) {
-    // Fallback: simpler invocation without the process-substitution trick that
-    // sh doesn't grok inside `argv`.
-    const ec = await Bun.spawn(
-      ["openssl", "ecparam", "-name", "prime256v1", "-out", path.join(root, "tls", "ec.params")],
-      { stdout: "pipe", stderr: "pipe" },
-    ).exited;
-    if (ec !== 0) throw new Error("openssl ecparam failed");
-    const ok = await Bun.spawn(
-      [
-        "openssl",
-        "req",
-        "-x509",
-        "-newkey",
-        `ec:${path.join(root, "tls", "ec.params")}`,
-        "-keyout",
-        keyPath,
-        "-out",
-        certPath,
-        "-days",
-        "3650",
-        "-nodes",
-        "-subj",
-        "/CN=mesh.local",
-      ],
-      { stdout: "pipe", stderr: "pipe" },
-    ).exited;
-    if (ok !== 0) throw new Error("openssl req failed; install openssl");
-  }
-  await fs.chmod(keyPath, 0o600);
-  const cert = (await fs.readFile(certPath)).toString("utf8");
-  const key = (await fs.readFile(keyPath)).toString("utf8");
+  const { cert, key } = await generateSelfSignedP256Cert();
+  await fs.writeFile(certPath, cert);
+  await fs.writeFile(keyPath, key, { mode: 0o600 });
   return { cert, key };
 }
 
@@ -189,6 +136,119 @@ function parsePkcs8Pem(pem: string): Uint8Array {
     }
   }
   throw new Error("could not locate ed25519 seed in PKCS#8 DER");
+}
+
+// ---------- Self-signed ECDSA P-256 TLS certificate (SubtleCrypto) ----------
+//
+// X.509 Certificate DER structure (minimal, v3, self-signed):
+//   Certificate ::= SEQUENCE {
+//     tbsCertificate    TBSCertificate,
+//     signatureAlgorithm AlgorithmIdentifier,   -- ecdsa-with-SHA256
+//     signatureValue    BIT STRING              -- DER-encoded ECDSA-Sig-Value
+//   }
+
+async function generateSelfSignedP256Cert(): Promise<{ cert: string; key: string }> {
+  const kp = await crypto.subtle.generateKey(
+    { name: "ECDSA", namedCurve: "P-256" },
+    true,
+    ["sign", "verify"],
+  );
+
+  const pkcs8 = new Uint8Array(await crypto.subtle.exportKey("pkcs8", kp.privateKey));
+  // exportKey("spki") returns a complete DER-encoded SubjectPublicKeyInfo — use it as-is.
+  const spki = new Uint8Array(await crypto.subtle.exportKey("spki", kp.publicKey));
+
+  const now = new Date();
+  const expire = new Date(now.getTime() + 3650 * 24 * 60 * 60 * 1000);
+
+  const algId = derSEQ(derOID(ECDSA_SHA256_OID));
+  const name = derSEQ(derSET(derSEQ(derCat(derOID(OID_CN), derTlv(0x0c, new TextEncoder().encode("mesh.local"))))));
+
+  const tbs = derSEQ(derCat(
+    derTlv(0xa0, derINT(new Uint8Array([0x02]))),           // [0] EXPLICIT version v3
+    derINT(tlsSerial()),                                     // serialNumber
+    algId,                                                   // signature
+    name,                                                    // issuer
+    derSEQ(derCat(derUTCTime(now), derUTCTime(expire))),    // validity
+    name,                                                    // subject
+    spki,                                                    // subjectPublicKeyInfo
+  ));
+
+  const tbsBuf = new Uint8Array(tbs).buffer as ArrayBuffer;
+  const rawSig = new Uint8Array(
+    await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, kp.privateKey, tbsBuf),
+  );
+
+  const certificate = derSEQ(derCat(
+    tbs,
+    algId,
+    derTlv(0x03, derCat(new Uint8Array([0x00]), ecdsaRawToDer(rawSig))), // BIT STRING
+  ));
+
+  return {
+    cert: derToPem(certificate, "CERTIFICATE"),
+    key: derToPem(pkcs8, "PRIVATE KEY"),
+  };
+}
+
+// OID 1.2.840.10045.4.3.2  (ecdsa-with-SHA256)
+const ECDSA_SHA256_OID = new Uint8Array([0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02]);
+// OID 2.5.4.3  (commonName)
+const OID_CN = new Uint8Array([0x55, 0x04, 0x03]);
+
+function derCat(...parts: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let off = 0;
+  for (const p of parts) { out.set(p, off); off += p.length; }
+  return out;
+}
+
+function derLen(n: number): Uint8Array {
+  if (n < 0x80) return new Uint8Array([n]);
+  if (n < 0x100) return new Uint8Array([0x81, n]);
+  return new Uint8Array([0x82, (n >> 8) & 0xff, n & 0xff]);
+}
+
+function derTlv(tag: number, value: Uint8Array): Uint8Array {
+  return derCat(new Uint8Array([tag]), derLen(value.length), value);
+}
+
+const derSEQ = (v: Uint8Array) => derTlv(0x30, v);
+const derSET = (v: Uint8Array) => derTlv(0x31, v);
+const derINT = (v: Uint8Array) => derTlv(0x02, v);
+const derOID = (v: Uint8Array) => derTlv(0x06, v);
+
+function tlsSerial(): Uint8Array {
+  const b = crypto.getRandomValues(new Uint8Array(8));
+  b[0]! &= 0x7f; // ensure positive
+  return b;
+}
+
+function derUTCTime(d: Date): Uint8Array {
+  const p = (n: number) => String(n).padStart(2, "0");
+  const s =
+    `${p(d.getUTCFullYear() % 100)}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}` +
+    `${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}Z`;
+  return derTlv(0x17, new TextEncoder().encode(s));
+}
+
+// Convert SubtleCrypto's raw IEEE P1363 signature (r||s) to DER ECDSA-Sig-Value.
+function ecdsaRawToDer(raw: Uint8Array): Uint8Array {
+  const half = raw.length / 2;
+  const encodeInt = (b: Uint8Array): Uint8Array => {
+    let i = 0;
+    while (i < b.length - 1 && b[i] === 0) i++;
+    b = b.slice(i);
+    if (b[0]! & 0x80) b = derCat(new Uint8Array([0x00]), b);
+    return derINT(b);
+  };
+  return derSEQ(derCat(encodeInt(raw.slice(0, half)), encodeInt(raw.slice(half))));
+}
+
+function derToPem(der: Uint8Array, label: string): string {
+  const b64 = Buffer.from(der).toString("base64");
+  const lines = b64.match(/.{1,64}/g) ?? [b64];
+  return `-----BEGIN ${label}-----\n${lines.join("\n")}\n-----END ${label}-----\n`;
 }
 
 function encodePkcs8Pem(seed: Uint8Array): string {
