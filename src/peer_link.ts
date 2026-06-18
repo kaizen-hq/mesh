@@ -16,6 +16,7 @@ import {
 import * as repoStore from "./repo_store.ts";
 import * as git from "./git.ts";
 import * as issues from "./issues.ts";
+import * as scheduler from "./ci/scheduler.ts";
 
 const HTTP_TIMEOUT_MS = 10_000;
 const RETRY_TICK_SECS = 2;
@@ -36,6 +37,7 @@ export async function handleInboundFrame(
       break;
     case "Heartbeat":
       peerEntry?.noteHeartbeat(null, msg.config_hash);
+      if (peerEntry && msg.capabilities) peerEntry.capabilities = msg.capabilities;
       for (const r of msg.repos) {
         state.ensureRepo(r.name).noteSource(sender);
       }
@@ -57,6 +59,72 @@ export async function handleInboundFrame(
         }
       })();
       break;
+    case "CiFrame":
+      void (async () => {
+        try {
+          await handleInboundCiFrame(state, sender, msg.msg);
+        } catch (e) {
+          console.warn(`CiFrame dispatch failed (sender=${sender}):`, (e as Error).message);
+        }
+      })();
+      break;
+  }
+}
+
+async function handleInboundCiFrame(
+  state: DaemonState,
+  sender: string,
+  msg: import("./proto.ts").CiMessage,
+): Promise<void> {
+  switch (msg.type) {
+    case "CiAssignment":
+      await scheduler.handleAssignment(state, msg, sender);
+      break;
+    case "CiAccepted":
+    case "CiDeclined":
+    case "CiStarted":
+    case "CiCompleted":
+    case "CiLog":
+      // Update in-memory run state and notify SSE subscribers
+      handleCiRunUpdate(state, msg);
+      break;
+    case "CiCronClaim": {
+      const claim = state.ci.cron_claims.get(msg.slot);
+      if (claim && !claim.started) {
+        claim.claims.push({ claimer: msg.claimer, capability_hash: msg.capability_hash });
+      }
+      break;
+    }
+  }
+}
+
+function handleCiRunUpdate(state: DaemonState, msg: import("./proto.ts").CiMessage): void {
+  switch (msg.type) {
+    case "CiStarted": {
+      const run = state.ci.runs.get(msg.run_id);
+      if (run) {
+        run.status = "running";
+        run.runner = msg.runner;
+        state.notifyCiRunChanged(msg.repo);
+      }
+      break;
+    }
+    case "CiCompleted": {
+      const run = state.ci.runs.get(msg.run_id);
+      if (run) {
+        run.status = msg.status;
+        run.completed_at = new Date().toISOString();
+        state.notifyCiRunChanged(msg.repo);
+      }
+      break;
+    }
+    case "CiLog": {
+      const buf = state.ci.log_buffers.get(msg.run_id);
+      if (buf) {
+        buf.chunks.push({ seq: msg.seq, t: msg.t, stream: msg.stream, data: msg.data });
+      }
+      break;
+    }
   }
 }
 
@@ -285,6 +353,7 @@ export async function runHeartbeat(state: DaemonState, secs: number): Promise<vo
         name: me,
         config_hash: raw_hash,
         repos,
+        capabilities: state.ciCapabilities ?? undefined,
       };
       let frame: Frame;
       try {
@@ -326,6 +395,12 @@ export function broadcastRefUpdate(
   skip: string | null,
 ): void {
   if (refs.length === 0) return;
+  // Trigger CI scheduling for each ref change
+  for (const ref of refs) {
+    void scheduler.onRefUpdate(state, repo, ref.name, ref.new_sha).catch((e) => {
+      console.debug(`CI onRefUpdate failed (repo=${repo} ref=${ref.name}):`, (e as Error).message);
+    });
+  }
   void (async () => {
     const me = state.config.self.name;
     for (const p of state.config.peers) {

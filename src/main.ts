@@ -18,6 +18,8 @@ import { buildZip, meshRoot, isCompiledBinary } from "./package_source.ts";
 import { runUpdate } from "./update.ts";
 import { runUpdateCode } from "./update_code.ts";
 import { runAddRepos } from "./add_repos.ts";
+import { loadCicdConfig, detectTools } from "./ci/config.ts";
+import { checkCronSlots, type CronJobSpec } from "./ci/cron.ts";
 import pkg from "../package.json" with { type: "json" };
 
 // Source-paradigm commands need the mesh source tree on the real filesystem,
@@ -52,6 +54,11 @@ const USAGE_TAIL = `  start [flags]                     Run the foreground serve
   join <token>                      accept a teammate's pairing token
   update [--from PEER] [--force]    fetch + swap a newer mesh binary
   update-code [--from PEER] [--force]  refresh a source-paradigm install
+  ci status [<repo>]                show recent pipeline runs
+  ci run <repo> <ref>               manually trigger a pipeline
+  ci logs <repo> <run_id>           print build log
+  ci cancel <run_id>                cancel a running job
+  ci runners                        list peers and their CI capabilities
 
 \`start\` flags:
   --listen ADDR                     HTTP bind (default 0.0.0.0:7979)
@@ -256,6 +263,8 @@ async function main() {
           from: (args.flags["from"] as string) || undefined,
           force: !!args.flags["force"],
         });
+      case "ci":
+        return await cmdCi(root, args);
       default:
         console.error(`unknown command: ${args.cmd}\n\n${USAGE}`);
         process.exit(2);
@@ -316,6 +325,18 @@ async function cmdStart(root: string, args: Args) {
   const state = await DaemonState.create(root, cfg, id);
   await repoStore.ensureMirrors(state);
 
+  // Load CI config and detect capabilities
+  state.ciConfig = await loadCicdConfig(root);
+  const tools = await detectTools(state.ciConfig.capabilities.tools);
+  state.ciCapabilities = {
+    os: process.platform,
+    arch: process.arch,
+    labels: state.ciConfig.runner.labels,
+    tools,
+    runner: state.ciConfig.runner.enabled,
+    load: { jobs_running: 0, cpu_percent: 0, mem_free_mb: 0 },
+  };
+
   const listen = (args.flags["listen"] as string) || "0.0.0.0:7979";
   const heartbeatSecs = Number(args.flags["heartbeat-secs"] ?? 15);
   const fetchSecs = Number(args.flags["fetch-secs"] ?? 60);
@@ -329,6 +350,7 @@ async function cmdStart(root: string, args: Args) {
   void peerLink.runHeartbeat(state, heartbeatSecs);
   void peerLink.runRetryLoop(state);
   void repoStore.runFetchLoop(state, fetchSecs);
+  void runCronLoop(state, fetchSecs);
 
   console.log("mesh up; press Ctrl-C to stop");
 
@@ -448,6 +470,89 @@ async function fileExists(p: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+async function cmdCi(root: string, args: Args): Promise<void> {
+  const sub = args.positional[0] ?? "status";
+  switch (sub) {
+    case "status": {
+      const repo = args.positional[1];
+      const resp = await control.sendRequest(root, { type: "ci_status", repo: repo ?? null });
+      if (resp.type === "error") { console.error("error:", resp.message); process.exit(1); }
+      const runs = resp.runs as Array<Record<string, unknown>>;
+      if (!runs.length) { console.log("(no runs)"); return; }
+      for (const r of runs) {
+        const sha7 = String(r.sha ?? "").slice(0, 7);
+        const ref = String(r.ref ?? "").replace("refs/heads/", "");
+        const dur = r.completed_at
+          ? `${Math.floor((new Date(String(r.completed_at)).getTime() - new Date(String(r.started_at)).getTime()) / 1000)}s`
+          : "running";
+        console.log(`  ${String(r.status).padEnd(10)} ${String(r.repo).padEnd(20)} ${ref.padEnd(20)} ${sha7.padEnd(10)} ${String(r.runner ?? "").padEnd(12)} ${dur}`);
+      }
+      return;
+    }
+    case "run": {
+      const repo = args.positional[1];
+      const ref = args.positional[2];
+      if (!repo || !ref) { console.error("usage: mesh ci run <repo> <ref>"); process.exit(1); }
+      await sendAndPrint(root, { type: "ci_run", repo, ref });
+      return;
+    }
+    case "logs": {
+      const repo = args.positional[1];
+      const runId = args.positional[2];
+      if (!repo || !runId) { console.error("usage: mesh ci logs <repo> <run_id>"); process.exit(1); }
+      const resp = await control.sendRequest(root, { type: "ci_logs", repo, run_id: runId });
+      if (resp.type === "error") { console.error("error:", resp.message); process.exit(1); }
+      console.log(resp.log as string);
+      return;
+    }
+    case "cancel": {
+      const runId = args.positional[1];
+      if (!runId) { console.error("usage: mesh ci cancel <run_id>"); process.exit(1); }
+      await sendAndPrint(root, { type: "ci_cancel", run_id: runId });
+      return;
+    }
+    case "runners": {
+      const resp = await control.sendRequest(root, { type: "ci_runners" });
+      if (resp.type === "error") { console.error("error:", resp.message); process.exit(1); }
+      const runners = resp.runners as Array<Record<string, unknown>>;
+      if (!runners.length) { console.log("(no runners found)"); return; }
+      for (const r of runners) {
+        const labels = (r.labels as string[]).join(",") || "(none)";
+        const load = r.load as Record<string, number>;
+        console.log(`  ${String(r.name).padEnd(16)} runner=${r.runner} labels=${labels} jobs=${load.jobs_running} cpu=${load.cpu_percent}%`);
+      }
+      return;
+    }
+    default:
+      console.error(`unknown ci subcommand: ${sub}`);
+      process.exit(2);
+  }
+}
+
+async function runCronLoop(state: DaemonState, intervalSecs: number): Promise<void> {
+  const { loadPipeline } = await import("./ci/config.ts");
+  while (true) {
+    await new Promise((r) => setTimeout(r, Math.max(1, intervalSecs) * 1000));
+    const now = new Date();
+    const specs: CronJobSpec[] = [];
+    for (const repo of state.config.repos) {
+      try {
+        const pipeline = await loadPipeline(repo.path);
+        if (!pipeline?.on.schedule) continue;
+        for (const s of pipeline.on.schedule) {
+          specs.push({ repo: repo.name, job: s.job, cron: s.cron });
+        }
+      } catch { /* skip repos without CI config */ }
+    }
+    const fires = checkCronSlots(specs, state.ci, now);
+    for (const fire of fires) {
+      void import("./ci/scheduler.ts").then(({ onRefUpdate }) =>
+        onRefUpdate(state, fire.repo, fire.job, fire.slotKey),
+      ).catch((e) => console.debug("cron fire failed:", (e as Error).message));
+    }
   }
 }
 

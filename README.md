@@ -6,6 +6,7 @@
 - Push-only peer link with retry queue + exponential backoff.
 - Full-mesh replication: every peer mirrors every repo any peer contributes.
 - ed25519-signed frames; bincode-encoded payloads.
+- Built-in CI/CD: distributed pipeline execution, cron scheduling, live log streaming.
 
 ## Why Bun Runtime
 
@@ -79,7 +80,143 @@ mesh add-repo <name> <path>            # contribute a working copy
 mesh invite --addr HOST:PORT           # generate a one-time pairing token
 mesh join <token>                      # accept a pairing token
 mesh sync                              # force a reconciliation round
+
+# CI/CD
+mesh ci status [<repo>]                # show recent pipeline runs
+mesh ci run <repo> <ref>               # manually trigger a pipeline
+mesh ci logs <repo> <run_id>           # print build log
+mesh ci cancel <run_id>                # cancel a running job
+mesh ci runners                        # list peers and their CI capabilities
 ```
+
+## CI/CD
+
+Mesh includes a distributed CI/CD system. Pipelines are defined per-repo and
+executed across peers. Any peer with `runner.enabled = true` in `cicd.toml`
+can accept jobs.
+
+> **Example repo:** [`kaizen-hq/hello-pipeline`](https://github.com/kaizen-hq/hello-pipeline)
+> is a minimal working example — a Bun HTTP server with a `Dockerfile`,
+> `docker-compose.yml`, and `.mesh/mesh-ci.yml` that runs shell and Docker jobs.
+> Clone it to have something to test against while setting up CI on your mesh.
+
+### Pipeline definition
+
+Add `.mesh/mesh-ci.yml` to a repo to define its pipeline:
+
+```yaml
+pipeline:
+  name: my-app
+
+on:
+  push:
+    branches: [main, "release/*"]
+  schedule:
+    - cron: "0 2 * * *"   # daily at 02:00 UTC
+      job: nightly
+  manual: true             # allow mesh ci run
+
+runner:
+  labels: [docker]         # require a runner with this label
+  fallback: any            # fall back to any capable peer if no labeled runner
+
+jobs:
+  test:
+    image: oven/bun:1.1
+    commands:
+      - bun install --frozen-lockfile
+      - bun test
+
+  build:
+    image: oven/bun:1.1
+    commands:
+      - bun run build
+    depends_on: [test]     # topological ordering; build waits for test
+
+  nightly:
+    mode: shell            # run commands directly (no Docker)
+    commands:
+      - bun run audit
+```
+
+Jobs run in Docker by default (`mode: docker`). Set `mode: shell` to run
+commands in a subprocess on the runner host.
+
+`depends_on` supports arbitrary DAGs. Cycles are rejected at parse time.
+Jobs whose upstream failed are automatically marked `skipped`.
+
+### Runner configuration
+
+Each node that should accept jobs needs `~/.mesh/cicd.toml`:
+
+```toml
+[runner]
+enabled             = true
+labels              = ["docker", "linux-amd64"]
+max_concurrent_jobs = 4
+workdir             = "/tmp/mesh-ci"   # where worktrees are checked out
+allow_shell         = true             # permit mode: shell jobs
+allow_shell_secrets = false            # inject secrets into shell jobs
+
+# Tuning
+log_stream_interval_ms  = 500
+max_worktree_age_minutes = 60
+max_worktree_disk_mb     = 2048
+log_retention_runs       = 50
+
+[capabilities]
+# Override auto-detected tools (docker, bun, node, python3, go, cargo)
+# tools = ["docker", "bun"]
+
+[secrets]
+NPM_TOKEN = "..."
+```
+
+Nodes without `cicd.toml`, or with `enabled = false`, participate in runner
+selection gossip (so they can assign jobs to others) but will not execute jobs
+themselves.
+
+### How it works
+
+**Trigger → assignment.** When a push arrives on a branch that matches
+`on.push.branches`, the receiving node selects the best available runner from
+the capability gossip it has heard via heartbeats. It sends a `CiAssignment`
+frame to that peer. If no peer has capacity, the job runs locally.
+
+**Runner selection.** Dedicated runners (matching `labels`) are preferred.
+Within a tier, the peer with the fewest running jobs and lowest CPU is chosen.
+If `fallback: any`, any peer with capacity is eligible.
+
+**Execution.** The runner checks out the commit into a git worktree under
+`workdir`, then runs each job in topological order. Docker jobs pull the image
+and exec commands inside a container. Shell jobs exec commands in a subprocess
+on the host.
+
+**Log streaming.** Stdout/stderr are captured in real time. Logs are stored
+under `~/.mesh/ci/<repo>/<run_id>/log.txt` and streamed live to the browser
+via SSE.
+
+**Cron scheduling.** Each node runs a cron loop (every `--fetch-secs`). When a
+cron slot fires, all eligible nodes broadcast a `CiCronClaim` frame. A
+deterministic sha256-based election picks one winner to execute the job —
+so the job runs exactly once across the mesh even with many peers online.
+
+**Gossip.** `CiStarted`, `CiCompleted`, and `CiLog` frames propagate to all
+peers so the browser dashboard stays in sync everywhere on the mesh.
+
+### Web UI
+
+The browser dashboard at `/status` links to per-repo views:
+
+| URL | Description |
+|-----|-------------|
+| `/repos/:name` | Redirects to `/repos/:name/ci` |
+| `/repos/:name/ci` | Pipeline run list with status badges, manual trigger form |
+| `/repos/:name/ci/:run_id` | Run detail with per-job status and live log stream |
+| `/repos/:name/issues` | Kanban issues board |
+
+Both the pipelines page and the issues board have a shared nav bar:
+**issues · pipelines**.
 
 ## Releasing
 

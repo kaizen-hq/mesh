@@ -175,6 +175,19 @@ export type IssueEvent =
       order: number;
     };
 
+// ---------- CI frame types ----------
+
+import type { Pipeline, TriggerKind, NodeCapabilities } from "./ci/types.ts";
+
+export type CiMessage =
+  | { type: "CiAssignment"; run_id: string; repo: string; ref: string; sha: string; pipeline: Pipeline; triggered_by: TriggerKind }
+  | { type: "CiAccepted"; run_id: string; runner: string }
+  | { type: "CiDeclined"; run_id: string; runner: string; reason: string }
+  | { type: "CiStarted"; run_id: string; repo: string; runner: string; started_at: string }
+  | { type: "CiLog"; run_id: string; repo: string; job: string; seq: number; t: string; stream: "stdout" | "stderr"; data: string }
+  | { type: "CiCompleted"; run_id: string; repo: string; status: "passed" | "failed"; duration_ms: number; log_hash: string }
+  | { type: "CiCronClaim"; repo: string; job: string; slot: string; claimer: string; capability_hash: string };
+
 // ---------- message union ----------
 
 export type Message =
@@ -189,6 +202,7 @@ export type Message =
       name: string;
       config_hash: string;
       repos: RepoStatus[];
+      capabilities?: NodeCapabilities;
     }
   | {
       kind: "RefUpdate";
@@ -198,6 +212,10 @@ export type Message =
   | {
       kind: "IssueEvent";
       event: IssueEvent;
+    }
+  | {
+      kind: "CiFrame";
+      msg: CiMessage;
     };
 
 // ---------- encode / decode Message (bincode-compatible) ----------
@@ -231,6 +249,13 @@ function encodeMessage(msg: Message): Uint8Array {
           e.str(b.sha);
         }
       }
+      // Optional capabilities: encoded as JSON string prefixed by a presence byte
+      if (msg.capabilities != null) {
+        e.raw(new Uint8Array([1]));
+        e.str(JSON.stringify(msg.capabilities));
+      } else {
+        e.raw(new Uint8Array([0]));
+      }
       break;
     case "RefUpdate":
       e.variant(2);
@@ -245,6 +270,10 @@ function encodeMessage(msg: Message): Uint8Array {
     case "IssueEvent":
       e.variant(3);
       e.str(JSON.stringify(msg.event));
+      break;
+    case "CiFrame":
+      e.variant(4);
+      e.str(JSON.stringify(msg.msg));
       break;
   }
   return e.finish();
@@ -276,7 +305,15 @@ function decodeMessage(buf: Uint8Array): Message {
         }
         repos.push({ name: rname, head_sha, branches });
       }
-      return { kind: "Heartbeat", name, config_hash, repos };
+      // Optional capabilities (presence byte added in CI phase)
+      let capabilities;
+      if (d.remaining() > 0) {
+        const flag = readByte(d);
+        if (flag === 1) {
+          capabilities = JSON.parse(d.str()) as import("./ci/types.ts").NodeCapabilities;
+        }
+      }
+      return { kind: "Heartbeat", name, config_hash, repos, capabilities };
     }
     case 2: {
       const repo = d.str();
@@ -290,6 +327,10 @@ function decodeMessage(buf: Uint8Array): Message {
     case 3: {
       const event = JSON.parse(d.str()) as IssueEvent;
       return { kind: "IssueEvent", event };
+    }
+    case 4: {
+      const msg = JSON.parse(d.str()) as CiMessage;
+      return { kind: "CiFrame", msg };
     }
     default:
       throw new Error(`unknown Message variant tag: ${tag}`);

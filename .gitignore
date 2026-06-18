@@ -137,3 +137,4 @@ certs
 charts/**/values.local.yaml
 mesh-src.zip
 mesh
+.claude
