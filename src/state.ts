@@ -6,6 +6,8 @@ import type { Frame } from "./proto.ts";
 import type { Config, AddressCache } from "./config.ts";
 import { loadAddressCache, saveAddressCache } from "./config.ts";
 import type { Identity } from "./identity.ts";
+import type { NodeCapabilities, CiState, CicdConfig } from "./ci/types.ts";
+import { emptyCiState } from "./ci/types.ts";
 
 export interface Divergence {
   peer: string;
@@ -41,6 +43,7 @@ export class PeerEntry {
   lastPostSeen: number | null = null;
   lastConfigHash: string | null = null;
   lastIssueSyncMs: number | null = null; // epoch ms of last successful issue full-sync pull
+  capabilities: NodeCapabilities | null = null;
 
   isConnected(): boolean {
     const recent = (t: number | null) => t != null && Date.now() - t < 60_000;
@@ -96,15 +99,16 @@ export class DaemonState {
   repos: Map<string, RepoLocal> = new Map();
   addressCache: AddressCache = { addresses: {} };
   outbound: Map<string, OutboundQueue> = new Map();
-  // Listen address the HTTP server was started with (e.g. "0.0.0.0:7979").
   listenAddr: string | null = null;
-  // nonce-hex → invite metadata; populated by `mesh invite` and consumed by
-  // POST /mesh/join when a joiner presents the matching nonce.
   pendingInvites: Map<string, PendingInvite> = new Map();
-  // Callbacks invoked when local issue state changes (SSE notification, etc.)
   issueChangedCallbacks: Array<(repo: string) => void> = [];
-  // Callbacks invoked when peer/repo status changes (SSE notification, etc.)
   statusChangedCallbacks: Array<() => void> = [];
+  // CI state
+  ci: CiState = emptyCiState();
+  ciConfig: CicdConfig | null = null;
+  ciCapabilities: NodeCapabilities | null = null;
+  // Callbacks for CI run changes (SSE)
+  ciRunChangedCallbacks: Array<(repo: string) => void> = [];
   private shutdownResolve: (() => void) | null = null;
   private shutdownPromise: Promise<void>;
 
@@ -181,6 +185,10 @@ export class DaemonState {
 
   notifyStatusChanged(): void {
     for (const cb of this.statusChangedCallbacks) cb();
+  }
+
+  notifyCiRunChanged(repo: string): void {
+    for (const cb of this.ciRunChangedCallbacks) cb(repo);
   }
 
   signalShutdown() {

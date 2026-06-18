@@ -5,6 +5,7 @@
 
 import * as path from "node:path";
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import type { DaemonState } from "./state.ts";
 import * as repoStore from "./repo_store.ts";
 import * as gitp from "./git.ts";
@@ -26,6 +27,10 @@ import { addPeerToConfig, loadConfig } from "./config.ts";
 import { ensureSelfSignedCert, defaultSanConfig } from "./tls.ts";
 import * as issues from "./issues.ts";
 import type { IssueEvent } from "./proto.ts";
+import * as ciHttp from "./ci/http.ts";
+import { loadRun, listRuns, readLog, tailLog } from "./ci/store.ts";
+import * as scheduler from "./ci/scheduler.ts";
+import { loadPipeline } from "./ci/config.ts";
 
 // ---------- SSE client registries ----------
 
@@ -50,6 +55,22 @@ const statusSseClients = new Set<() => void>();
 
 function notifyStatusChanged(): void {
   for (const send of statusSseClients) send();
+}
+
+// CI run SSE clients: repo → set of send-functions
+const ciRunSseClients = new Map<string, Set<() => void>>();
+
+function subscribeCiRunEvents(repo: string, send: () => void): () => void {
+  let clients = ciRunSseClients.get(repo);
+  if (!clients) { clients = new Set(); ciRunSseClients.set(repo, clients); }
+  clients.add(send);
+  return () => clients!.delete(send);
+}
+
+function notifyCiRunChanged(repo: string): void {
+  const clients = ciRunSseClients.get(repo);
+  if (!clients) return;
+  for (const send of clients) send();
 }
 
 export interface ServerHandle {
@@ -101,6 +122,7 @@ export async function run(state: DaemonState, listen: string): Promise<ServerHan
   // Wire SSE notifications so incoming frames trigger live updates
   state.issueChangedCallbacks.push((repo) => notifyIssueChanged(repo));
   state.statusChangedCallbacks.push(() => notifyStatusChanged());
+  state.ciRunChangedCallbacks.push((repo) => notifyCiRunChanged(repo));
 
   return {
     async stop() {
@@ -144,6 +166,23 @@ async function routeRequest(state: DaemonState, req: Request, server: any): Prom
   if (issueSyncMatch && req.method === "GET") {
     return handleIssueAll(state, issueSyncMatch[1]!);
   }
+  // CI peer-sync and log-chunk routes
+  const ciRoute = await ciHttp.route(state, req, path);
+  if (ciRoute) return ciRoute;
+
+  // Repo hub: /repos/:name → redirect to /repos/:name/ci
+  const repoHubMatch = /^\/repos\/([^/]+)$/.exec(path);
+  if (repoHubMatch && req.method === "GET") {
+    const repo = decodeURIComponent(repoHubMatch[1]!);
+    return new Response("", { status: 302, headers: { Location: `/repos/${encodeURIComponent(repo)}/ci` } });
+  }
+
+  // CI routes: /repos/:name/ci[/...]
+  const ciMatch = /^\/repos\/([^/]+)\/ci(\/.*)?$/.exec(path);
+  if (ciMatch) {
+    return handleCi(state, req, decodeURIComponent(ciMatch[1]!), ciMatch[2] ?? "");
+  }
+
   // Issues board: /repos/:name/issues[/...]
   const issueMatch = /^\/repos\/([^/]+)\/issues(\/.*)?$/.exec(path);
   if (issueMatch) {
@@ -272,6 +311,374 @@ async function handleFramePost(state: DaemonState, req: Request, server: any): P
   return new Response("", { status: 202 });
 }
 
+// ---------- CI routes ----------
+
+async function handleCi(
+  state: DaemonState,
+  req: Request,
+  repo: string,
+  tail: string,
+): Promise<Response> {
+  const method = req.method;
+
+  // GET /repos/:name/ci → pipelines tab (run list)
+  if (tail === "" || tail === "/") {
+    if (method === "GET") return handleCiPipelinesTab(state, repo);
+    return textResponse(405, "method not allowed");
+  }
+
+  // GET /repos/:name/ci/events → SSE for run-changed
+  if (tail === "/events" && method === "GET") {
+    return handleCiEvents(repo);
+  }
+
+  // POST /repos/:name/ci/run → manual trigger
+  if (tail === "/run" && method === "POST") {
+    return handleCiManualRun(state, req, repo);
+  }
+
+  // /repos/:name/ci/:runId[/...]
+  const runMatch = /^\/([^/]+)(\/.*)?$/.exec(tail);
+  if (runMatch) {
+    const runId = decodeURIComponent(runMatch[1]!);
+    const runTail = runMatch[2] ?? "";
+
+    if (runTail === "" && method === "GET") return handleCiRunDetail(state, repo, runId);
+    if (runTail === "/log/stream" && method === "GET") return handleCiLogStream(state, repo, runId);
+  }
+
+  return textResponse(404, "not found");
+}
+
+async function handleCiPipelinesTab(state: DaemonState, repo: string): Promise<Response> {
+  const repoCfg = state.config.repos.find((r) => r.name === repo);
+  const repoAbsPath = repoCfg
+    ? (path.isAbsolute(repoCfg.path) ? repoCfg.path : path.join(os.homedir(), repoCfg.path))
+    : null;
+  const pipeline = repoAbsPath ? await loadPipeline(repoAbsPath).catch(() => null) : null;
+
+  // Merge in-memory runs (current session) with persisted runs from disk so the
+  // list survives daemon restarts. In-memory takes precedence for live status.
+  const inMemRuns = [...state.ci.runs.values()].filter((r) => r.repo === repo);
+  const inMemIds = new Set(inMemRuns.map((r) => r.run_id));
+  const diskIndex = pipeline ? await listRuns(state.root, repo) : [];
+  const diskRuns = (
+    await Promise.all(
+      diskIndex
+        .filter((e) => !inMemIds.has(e.run_id))
+        .map((e) => loadRun(state.root, repo, e.run_id)),
+    )
+  ).filter((r): r is import("./ci/types.ts").PipelineRun => r !== null);
+
+  const allRuns = [...inMemRuns, ...diskRuns]
+    .sort((a, b) => (a.started_at > b.started_at ? -1 : 1));
+
+  return new Response(renderCiPipelinesPage(state, repo, allRuns, pipeline !== null), {
+    status: 200,
+    headers: { "content-type": "text/html; charset=utf-8" },
+  });
+}
+
+async function handleCiRunDetail(state: DaemonState, repo: string, runId: string): Promise<Response> {
+  const run = await loadRun(state.root, repo, runId);
+  if (!run) return textResponse(404, "run not found");
+  const log = run.status !== "running" ? await readLog(state.root, repo, runId) : "";
+  return new Response(renderCiRunDetailPage(state, repo, run, log), {
+    status: 200,
+    headers: { "content-type": "text/html; charset=utf-8" },
+  });
+}
+
+async function handleCiManualRun(state: DaemonState, req: Request, repo: string): Promise<Response> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let form: any;
+  try { form = await req.formData(); } catch {
+    return textResponse(400, "expected form body");
+  }
+  const ref = (form.get("ref") ?? "").toString().trim();
+  if (!ref) return textResponse(400, "ref is required");
+
+  void scheduler.onRefUpdate(state, repo, ref, ref).catch(() => {});
+  return new Response("", { status: 303, headers: { Location: `/repos/${encodeURIComponent(repo)}/ci` } });
+}
+
+function handleCiLogStream(state: DaemonState, repo: string, runId: string): Response {
+  const encoder = new TextEncoder();
+  let cancelled = false;
+  const isDone = () => {
+    if (cancelled) return true;
+    const run = state.ci.runs.get(runId);
+    return run != null && run.status !== "running" && run.status !== "pending";
+  };
+
+  const stream = new ReadableStream({
+    async start(controller) {
+      try {
+        for await (const chunk of tailLog(state.root, repo, runId, 200, isDone)) {
+          const data = JSON.stringify({ data: chunk });
+          controller.enqueue(encoder.encode(`event: log-chunk\ndata: ${data}\n\n`));
+        }
+      } catch { /* stream ended */ } finally {
+        controller.close();
+      }
+    },
+    cancel() { cancelled = true; },
+  });
+  return new Response(stream, {
+    status: 200,
+    headers: { "content-type": "text/event-stream", "cache-control": "no-cache" },
+  });
+}
+
+function handleCiEvents(repo: string): Response {
+  const encoder = new TextEncoder();
+  let unsub: (() => void) | undefined;
+  let pingTimer: ReturnType<typeof setInterval> | undefined;
+
+  const stream = new ReadableStream({
+    start(controller) {
+      const send = () => {
+        try { controller.enqueue(encoder.encode("event: run-changed\ndata: {}\n\n")); }
+        catch { /* disconnected */ }
+      };
+      unsub = subscribeCiRunEvents(repo, send);
+      pingTimer = setInterval(() => {
+        try { controller.enqueue(encoder.encode(": ping\n\n")); }
+        catch { clearInterval(pingTimer); }
+      }, 25_000);
+      controller.enqueue(encoder.encode(": connected\n\n"));
+    },
+    cancel() { unsub?.(); clearInterval(pingTimer); },
+  });
+
+  return new Response(stream, {
+    status: 200,
+    headers: { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" },
+  });
+}
+
+// ---------- CI HTML rendering ----------
+
+function ciStatusBadge(status: string): string {
+  switch (status) {
+    case "passed": return `<span class="ok">✓ pass</span>`;
+    case "failed": return `<span class="down">✗ fail</span>`;
+    case "running": return `<span class="running">● run</span>`;
+    case "cancelled": return `<span class="down">✕ cancelled</span>`;
+    default: return `<span>${esc(status)}</span>`;
+  }
+}
+
+function renderCiPipelinesPage(
+  state: DaemonState,
+  repo: string,
+  runs: import("./ci/types.ts").PipelineRun[],
+  hasPipeline: boolean,
+): string {
+  const me = state.config.self.name;
+
+  let rows = "";
+  for (const run of runs.slice(0, 50)) {
+    const sha7 = run.sha.slice(0, 7);
+    const ref = run.ref.replace("refs/heads/", "");
+    const trigger = run.triggered_by.type === "push"
+      ? `push (${esc(run.triggered_by.pusher)})`
+      : run.triggered_by.type === "cron"
+        ? "cron"
+        : `manual (${esc((run.triggered_by as { initiator: string }).initiator)})`;
+    const dur = run.completed_at
+      ? `${Math.floor((new Date(run.completed_at).getTime() - new Date(run.started_at).getTime()) / 1000)}s`
+      : "running";
+    rows += `<tr>
+      <td>${ciStatusBadge(run.status)}</td>
+      <td><code>${esc(ref)}</code></td>
+      <td><code>${esc(sha7)}</code></td>
+      <td>${esc(trigger)}</td>
+      <td>${esc(run.runner)}</td>
+      <td>${esc(dur)}</td>
+      <td><a href="/repos/${esc(repo)}/ci/${esc(run.run_id)}">${relativeAge(run.started_at)}</a></td>
+    </tr>`;
+  }
+  if (!rows) rows = `<tr><td colspan="7"><em>(no runs yet)</em></td></tr>`;
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>pipelines — ${esc(repo)} — ${esc(me)}</title>
+<style>
+  body { font: 14px/1.5 -apple-system, BlinkMacSystemFont, system-ui, sans-serif; max-width: 1080px; margin: 2rem auto; padding: 0 1rem; color: #1d1f22; }
+  a { color: inherit; }
+  h1 { margin: 0 0 1rem; font-size: 1.1rem; font-weight: 400; }
+  h1 strong { font-weight: 700; }
+  nav { margin-bottom: 1.5rem; display: flex; gap: 1rem; }
+  nav a { padding: .3rem .6rem; border-radius: 3px; text-decoration: none; font-size: 13px; color: #555; }
+  nav a.active { background: #1d1f22; color: #fff; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid #eaecef; font-size: 13px; }
+  th { background: #f8f9fa; font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .03em; color: #555; }
+  td code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .ok { color: #1a7f37; font-weight: 600; }
+  .down { color: #cf222e; font-weight: 600; }
+  .running { color: #9a6700; font-weight: 600; }
+  .run-btn { background: none; border: 1px solid #ddd; border-radius: 3px; padding: .3rem .7rem; font-size: 12px; cursor: pointer; font-family: inherit; color: #555; }
+  .run-btn:hover { background: #f0f0f0; }
+  .run-form { display: flex; gap: .5rem; align-items: center; margin-bottom: 1rem; }
+  .run-form input { font-family: inherit; font-size: 13px; border: 1px solid #ddd; border-radius: 3px; padding: .3rem .6rem; }
+  .no-pipeline { margin-top: 1rem; color: #555; }
+  .no-pipeline p { margin: 0 0 .6rem; }
+  .no-pipeline pre { background: #f4f5f7; border: 1px solid #eaecef; border-radius: 4px; padding: .75rem 1rem; font-size: 12.5px; line-height: 1.6; overflow-x: auto; margin: 0 0 1rem; }
+  .no-pipeline code { background: #f4f5f7; padding: 1px 5px; border-radius: 3px; font-size: 12.5px; }
+  footer { margin-top: 2rem; color: #888; font-size: 12px; }
+</style>
+</head>
+<body>
+<h1><a href="/status">${esc(me)}</a> / <strong>${esc(repo)}</strong></h1>
+<nav>
+  <a href="/repos/${esc(repo)}/issues">issues</a>
+  <a href="/repos/${esc(repo)}/ci" class="active">pipelines</a>
+</nav>
+
+${hasPipeline ? `
+<form class="run-form" method="POST" action="/repos/${esc(repo)}/ci/run">
+  <input name="ref" placeholder="branch or SHA" required>
+  <button class="run-btn" type="submit">run pipeline</button>
+</form>
+
+<div id="runs-table">
+<table>
+  <thead><tr><th>status</th><th>ref</th><th>sha</th><th>triggered by</th><th>runner</th><th>duration</th><th>started</th></tr></thead>
+  <tbody>${rows}</tbody>
+</table>
+</div>` : `
+<div class="no-pipeline">
+  <p>No pipeline configured for this repo.</p>
+  <p>Create <code>.mesh/mesh-ci.yml</code> and commit it to get started:</p>
+  <pre>pipeline:
+  name: ${esc(repo)}
+
+on:
+  push:
+    branches: [main]
+  manual: true
+
+jobs:
+  test:
+    mode: shell
+    commands:
+      - bun test</pre>
+  <p>Then enable shell execution on this node in <code>~/.mesh/cicd.toml</code>:</p>
+  <pre>[runner]
+enabled = true
+allow_shell = true</pre>
+</div>`}
+
+<footer><a href="/status">mesh status</a></footer>
+
+<script>
+const es = new EventSource(location.pathname + '/events');
+es.addEventListener('run-changed', async () => {
+  try {
+    const html = await fetch(location.pathname).then(r => r.text());
+    const tmp = document.createElement('div');
+    tmp.innerHTML = html;
+    const next = tmp.querySelector('#runs-table');
+    if (next) document.getElementById('runs-table').replaceWith(next);
+  } catch {}
+});
+</script>
+</body>
+</html>`;
+}
+
+function renderCiRunDetailPage(
+  state: DaemonState,
+  repo: string,
+  run: import("./ci/types.ts").PipelineRun,
+  log: string,
+): string {
+  const me = state.config.self.name;
+  const ref = run.ref.replace("refs/heads/", "");
+  const sha7 = run.sha.slice(0, 7);
+  const trigger = run.triggered_by.type === "push"
+    ? `push by ${esc(run.triggered_by.pusher)}`
+    : run.triggered_by.type === "cron"
+      ? `cron (${esc(run.triggered_by.slot)})`
+      : `manual by ${esc((run.triggered_by as { initiator: string }).initiator)}`;
+  const dur = run.completed_at
+    ? `${Math.floor((new Date(run.completed_at).getTime() - new Date(run.started_at).getTime()) / 1000)}s`
+    : "running";
+
+  let jobRows = "";
+  for (const [jobName, job] of Object.entries(run.jobs)) {
+    const d = job.completed_at && job.started_at
+      ? `${Math.floor((new Date(job.completed_at).getTime() - new Date(job.started_at).getTime()) / 1000)}s`
+      : "";
+    jobRows += `<tr><td>${esc(jobName)}</td><td>${ciStatusBadge(job.status)}</td><td>${esc(d)}</td><td>${job.exit_code ?? ""}</td></tr>`;
+  }
+
+  const logBlock = run.status === "running"
+    ? `<pre id="log-viewer" class="log-viewer"></pre>
+<script>
+const es = new EventSource('/repos/${esc(repo)}/ci/${esc(run.run_id)}/log/stream');
+const pre = document.getElementById('log-viewer');
+let follow = true;
+pre.addEventListener('scroll', () => { follow = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40; });
+es.addEventListener('log-chunk', e => {
+  const d = JSON.parse(e.data);
+  pre.textContent += d.data;
+  if (follow) pre.scrollTop = pre.scrollHeight;
+});
+</script>`
+    : `<pre class="log-viewer">${esc(log)}</pre>`;
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>run ${esc(run.run_id.slice(0, 8))} — ${esc(repo)}</title>
+<style>
+  body { font: 14px/1.5 -apple-system, BlinkMacSystemFont, system-ui, sans-serif; max-width: 1080px; margin: 2rem auto; padding: 0 1rem; color: #1d1f22; }
+  a { color: inherit; }
+  h1 { margin: 0 0 .5rem; font-size: 1.1rem; font-weight: 400; }
+  h2 { font-size: .95rem; margin: 1.5rem 0 .4rem; }
+  .meta { color: #666; font-size: 13px; margin-bottom: 1rem; }
+  .meta code { background: #f4f5f7; padding: 1px 5px; border-radius: 3px; font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; margin-bottom: 1rem; }
+  th, td { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid #eaecef; font-size: 13px; }
+  th { background: #f8f9fa; font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .03em; color: #555; }
+  .ok { color: #1a7f37; font-weight: 600; }
+  .down { color: #cf222e; font-weight: 600; }
+  .running { color: #9a6700; font-weight: 600; }
+  .log-viewer { background: #1d1f22; color: #d1d5db; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; padding: 1rem; border-radius: 3px; overflow: auto; max-height: 600px; white-space: pre; }
+  footer { margin-top: 2rem; color: #888; font-size: 12px; }
+</style>
+</head>
+<body>
+<h1><a href="/status">${esc(me)}</a> / <a href="/repos/${esc(repo)}/ci">${esc(repo)} pipelines</a> / run <code>${esc(run.run_id.slice(0, 8))}</code></h1>
+<div class="meta">
+  ${ciStatusBadge(run.status)} &middot;
+  ref <code>${esc(ref)}</code> &middot;
+  sha <code>${esc(sha7)}</code> &middot;
+  ${esc(trigger)} &middot;
+  runner <code>${esc(run.runner)}</code> &middot;
+  ${esc(dur)}
+</div>
+
+<h2>jobs</h2>
+<table>
+  <thead><tr><th>job</th><th>status</th><th>duration</th><th>exit code</th></tr></thead>
+  <tbody>${jobRows || `<tr><td colspan="4"><em>(no jobs)</em></td></tr>`}</tbody>
+</table>
+
+<h2>log</h2>
+${logBlock}
+
+<footer><a href="/repos/${esc(repo)}/ci">← back to pipelines</a></footer>
+</body>
+</html>`;
+}
+
 // ---------- git smart-HTTP ----------
 
 interface ParsedPath {
@@ -357,6 +764,20 @@ async function handleGit(state: DaemonState, req: Request, url: URL): Promise<Re
 
 // ---------- GET /status ----------
 
+function latestRunBadge(state: DaemonState, repo: string, now: number): string {
+  // Find the most recently completed run for this repo
+  let latest: import("./ci/types.ts").PipelineRun | null = null;
+  for (const run of state.ci.runs.values()) {
+    if (run.repo !== repo) continue;
+    if (!latest || run.started_at > latest.started_at) latest = run;
+  }
+  if (!latest) return `<span style="color:#999">—</span>`;
+  const age = latest.completed_at
+    ? `${Math.floor((now - new Date(latest.completed_at).getTime()) / 60000)}m ago`
+    : "running";
+  return `${ciStatusBadge(latest.status)} <a href="/repos/${esc(repo)}/ci/${esc(latest.run_id)}" style="font-size:11px;color:#666">${esc(age)}</a>`;
+}
+
 function renderStatusData(state: DaemonState): string {
   const cfg = state.config;
   const me = cfg.self.name;
@@ -391,9 +812,11 @@ function renderStatusData(state: DaemonState): string {
     const kind = contributed.has(name) ? "ours" : "mirror";
     const divCount = local?.divergenceList().length ?? 0;
     const divCell = divCount > 0 ? `<span class="down">${divCount}</span>` : "0";
-    repoRows += `<tr><td><a href="/repos/${esc(name)}/issues">${esc(name)}</a></td><td>${kind}</td><td><code>${esc(head)}</code></td><td>${esc(lf)}</td><td>${esc(sources)}</td><td>${divCell}</td></tr>`;
+    // Last build badge
+    const lastBuild = latestRunBadge(state, name, now);
+    repoRows += `<tr><td><a href="/repos/${esc(name)}">${esc(name)}</a></td><td>${kind}</td><td><code>${esc(head)}</code></td><td>${esc(lf)}</td><td>${esc(sources)}</td><td>${divCell}</td><td>${lastBuild}</td></tr>`;
   }
-  if (!repoRows) repoRows = `<tr><td colspan="6"><em>(no repos)</em></td></tr>`;
+  if (!repoRows) repoRows = `<tr><td colspan="7"><em>(no repos)</em></td></tr>`;
 
   return `<div id="status-data">
 <h2>peers</h2>
@@ -403,7 +826,7 @@ function renderStatusData(state: DaemonState): string {
 </table>
 <h2>repos</h2>
 <table>
-  <thead><tr><th>name</th><th>kind</th><th>head</th><th>last reconcile</th><th>sources</th><th>divergent</th></tr></thead>
+  <thead><tr><th>name</th><th>kind</th><th>head</th><th>last reconcile</th><th>sources</th><th>divergent</th><th>last build</th></tr></thead>
   <tbody>${repoRows}</tbody>
 </table>
 </div>`;
@@ -955,10 +1378,20 @@ function renderBoardPage(state: DaemonState, repo: string, all: issues.Issue[]):
   .card.dragging { opacity: .35; }
 
   footer { margin-top: 2rem; color: #888; font-size: 12px; }
+
+  /* repo nav */
+  nav { margin-bottom: 1.5rem; display: flex; gap: 1rem; }
+  nav a { padding: .3rem .6rem; border-radius: 3px; text-decoration: none; font-size: 13px; color: #555; }
+  nav a.active { background: #1d1f22; color: #fff; }
 </style>
 </head>
 <body>
-<h1><a href="/status">${esc(me)}</a> / <a href="/repos/${esc(repo)}/issues"><strong>${esc(repo)}</strong> issues</a></h1>
+<h1><a href="/status">${esc(me)}</a> / <a href="/repos/${esc(repo)}/issues"><strong>${esc(repo)}</strong></a></h1>
+
+<nav>
+  <a href="/repos/${esc(repo)}/issues" class="active">issues</a>
+  <a href="/repos/${esc(repo)}/ci">pipelines</a>
+</nav>
 
 <div class="board-filters">
 ${chipHtml}

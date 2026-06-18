@@ -6,6 +6,8 @@ import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import type { DaemonState } from "./state.ts";
 import * as repoStore from "./repo_store.ts";
+import { onRefUpdate } from "./ci/scheduler.ts";
+
 import {
   loadConfig,
   addPeerToConfig,
@@ -307,6 +309,61 @@ async function dispatch(state: DaemonState, req: ControlRequest): Promise<Contro
       } catch (e) {
         return { type: "error", message: (e as Error).message };
       }
+    }
+    // ---------- CI commands ----------
+    case "ci_status": {
+      const repo = req.repo ? String(req.repo) : null;
+      const { listRuns, loadRun } = await import("./ci/store.ts");
+      const repos = repo
+        ? state.config.repos.filter((r) => r.name === repo)
+        : state.config.repos;
+      const runList: unknown[] = [];
+      for (const r of repos) {
+        const entries = await listRuns(state.root, r.name);
+        for (const e of entries.slice(0, 10)) {
+          const run = await loadRun(state.root, r.name, e.run_id);
+          if (run) runList.push(run);
+        }
+      }
+      return { type: "ci_status", runs: runList };
+    }
+    case "ci_run": {
+      const repo = String(req.repo ?? "");
+      const ref = String(req.ref ?? "");
+      if (!repo || !ref) return { type: "error", message: "ci_run requires repo and ref" };
+      void onRefUpdate(state, repo, ref, ref).catch(() => {});
+      return { type: "ok" };
+    }
+    case "ci_logs": {
+      const repo = String(req.repo ?? "");
+      const runId = String(req.run_id ?? "");
+      if (!repo || !runId) return { type: "error", message: "ci_logs requires repo and run_id" };
+      const { readLog } = await import("./ci/store.ts");
+      const log = await readLog(state.root, repo, runId);
+      return { type: "ci_logs", log };
+    }
+    case "ci_cancel": {
+      const runId = String(req.run_id ?? "");
+      const run = state.ci.runs.get(runId);
+      if (!run) return { type: "error", message: `run ${runId} not found` };
+      run.status = "cancelled";
+      run.completed_at = new Date().toISOString();
+      state.notifyCiRunChanged(run.repo);
+      return { type: "ok" };
+    }
+    case "ci_runners": {
+      const runners: unknown[] = [];
+      for (const [name, peer] of state.peers.entries()) {
+        if (!peer.capabilities) continue;
+        runners.push({
+          name,
+          runner: peer.capabilities.runner,
+          labels: peer.capabilities.labels,
+          tools: peer.capabilities.tools,
+          load: peer.capabilities.load,
+        });
+      }
+      return { type: "ci_runners", runners };
     }
     default:
       return { type: "error", message: `unknown command: ${req.type}` };
