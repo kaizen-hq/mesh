@@ -78,7 +78,7 @@ export async function loadConfig(file: string): Promise<Config> {
 
   const tx = (t["transport"] ?? {}) as Record<string, unknown>;
   const transport: TransportSection = {
-    tls: !!tx.tls,
+    tls: typeof tx.tls === "boolean" ? tx.tls : true,
     poll_secs: typeof tx.poll_secs === "number" ? tx.poll_secs : 1,
   };
 
@@ -240,15 +240,15 @@ export async function saveAddressCache(root: string, cache: AddressCache): Promi
  * Normalise a peer address string into a base URL + host:port. If the address
  * is bare (no scheme), `defaultTls` decides between http and https — callers
  * pass their own `transport.tls` so a TLS-enabled node defaults to https for
- * peers it talks to.
- *   "10.0.1.42:7979", tls=false → ["http://10.0.1.42:7979",  "10.0.1.42:7979"]
+ * peers it talks to. Defaults to true (TLS on).
  *   "10.0.1.42:7979", tls=true  → ["https://10.0.1.42:7979", "10.0.1.42:7979"]
+ *   "10.0.1.42:7979", tls=false → ["http://10.0.1.42:7979",  "10.0.1.42:7979"]
  *   "http://kyle:7979"          → ["http://kyle:7979",       "kyle:7979"]
  *   "https://alice:8443"        → ["https://alice:8443",     "alice:8443"]
  */
 export function normalizePeerUrl(
   addr: string,
-  defaultTls = false,
+  defaultTls = true,
 ): { baseUrl: string; hostPort: string } {
   const trimmed = addr.replace(/\/$/, "");
   if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
