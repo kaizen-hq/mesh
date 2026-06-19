@@ -23,7 +23,7 @@ import {
   type JoinRequest,
   type JoinResponse,
 } from "./invite.ts";
-import { addPeerToConfig, loadConfig } from "./config.ts";
+import { addPeerToConfig, loadConfig, savePendingInvites } from "./config.ts";
 import { ensureSelfSignedCert, defaultSanConfig } from "./tls.ts";
 import * as issues from "./issues.ts";
 import type { IssueEvent } from "./proto.ts";
@@ -31,6 +31,29 @@ import * as ciHttp from "./ci/http.ts";
 import { loadRun, listRuns, readLog, tailLog } from "./ci/store.ts";
 import * as scheduler from "./ci/scheduler.ts";
 import { loadPipeline } from "./ci/config.ts";
+
+// ---------- security helpers ----------
+
+function isLoopback(ip: string): boolean {
+  return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1" || ip === "localhost";
+}
+
+// Replay protection: reject any frame whose signature was already seen within
+// the last 5 minutes. The 64-byte ed25519 signature is unique per frame, so
+// it's a fine dedup key without needing a dedicated nonce field.
+const seenFrameSigs = new Map<string, number>(); // sig_hex → expiry_ms
+const REPLAY_WINDOW_MS = 5 * 60 * 1000;
+
+function isReplay(sig: Uint8Array): boolean {
+  const now = Date.now();
+  const hex = Buffer.from(sig).toString("hex");
+  for (const [h, exp] of seenFrameSigs) {
+    if (exp < now) seenFrameSigs.delete(h);
+  }
+  if (seenFrameSigs.has(hex)) return true;
+  seenFrameSigs.set(hex, now + REPLAY_WINDOW_MS);
+  return false;
+}
 
 // ---------- SSE client registries ----------
 
@@ -116,7 +139,7 @@ export async function run(state: DaemonState, listen: string): Promise<ServerHan
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const server = (Bun as any).serve(serveOpts);
   console.log(
-    `mesh HTTP server listening at ${useTls ? "https" : "http"}://${host}:${port}`,
+    `mesh HTTP server listening at ${useTls ? "https" : "http"}://${host === '0.0.0.0' ? 'localhost' : host }:${port}`,
   );
 
   // Wire SSE notifications so incoming frames trigger live updates
@@ -189,7 +212,7 @@ async function routeRequest(state: DaemonState, req: Request, server: any): Prom
     return handleIssues(state, req, decodeURIComponent(issueMatch[1]!), issueMatch[2] ?? "");
   }
   // git smart-HTTP
-  return handleGit(state, req, url);
+  return handleGit(state, req, url, server);
 }
 
 // ---------- POST /mesh/join ----------
@@ -225,6 +248,7 @@ async function handleJoinPost(state: DaemonState, req: Request): Promise<Respons
   // Burn the nonce regardless of whether we successfully persist; a retry
   // with the same token must not succeed.
   state.pendingInvites.delete(hex);
+  void savePendingInvites(state.root, state.pendingInvites).catch(() => {});
 
   const cfgPath = path.join(state.root, "mesh.toml");
   try {
@@ -265,6 +289,9 @@ async function handleFramePost(state: DaemonState, req: Request, server: any): P
     frame = decodeFrame(body);
   } catch (e) {
     return textResponse(400, `frame decode: ${(e as Error).message}`);
+  }
+  if (isReplay(frame.signature)) {
+    return textResponse(400, "duplicate frame (replay rejected)");
   }
   if (frame.dest !== state.config.self.name) {
     return textResponse(400, "frame.dest does not match this peer");
@@ -553,24 +580,48 @@ ${hasPipeline ? `
 </div>` : `
 <div class="no-pipeline">
   <p>No pipeline configured for this repo.</p>
-  <p>Create <code>.mesh/mesh-ci.yml</code> and commit it to get started:</p>
+  <p>Create <code>.mesh/mesh-ci.yml</code> in the repo root and commit it:</p>
   <pre>pipeline:
   name: ${esc(repo)}
 
 on:
   push:
     branches: [main]
-  manual: true
+  manual: true             # allow mesh ci run
+
+runner:
+  labels: []               # empty = any runner; set e.g. [docker] for dedicated nodes
+  fallback: any
 
 jobs:
   test:
-    mode: shell
+    image: oven/bun:1.1    # docker mode (default)
     commands:
-      - bun test</pre>
-  <p>Then enable shell execution on this node in <code>~/.mesh/cicd.toml</code>:</p>
+      - bun install --frozen-lockfile
+      - bun test
+    secrets: [NPM_TOKEN]   # injected from ~/.mesh/secrets.yml
+
+  build:
+    image: oven/bun:1.1
+    commands:
+      - bun run build
+    depends_on: [test]     # runs after test passes
+
+  lint:
+    mode: shell            # runs directly on the runner host (no Docker)
+    commands:
+      - bun run lint</pre>
+  <p>Runner configuration lives in <code>~/.mesh/mesh.toml</code> on each node:</p>
   <pre>[runner]
-enabled = true
-allow_shell = true</pre>
+enabled             = true
+execution_modes     = ["docker", "shell"]   # permit docker, shell, or both
+labels              = []
+max_concurrent_jobs = 2
+# env_passthrough = ["GOPATH", "SSH_AUTH_SOCK"]  # host vars shell jobs may read</pre>
+  <p>Node-local secrets live in <code>~/.mesh/secrets.yml</code> (never committed):</p>
+  <pre>secrets:
+  NPM_TOKEN: "\${NPM_TOKEN}"   # interpolated from the daemon's environment
+  DEPLOY_KEY: "literal-value"</pre>
 </div>`}
 
 <footer><a href="/status">mesh status</a></footer>
@@ -696,7 +747,8 @@ function parseGitPath(p: string): ParsedPath | null {
   return { repo: head.slice(0, -4), tail: rest };
 }
 
-async function handleGit(state: DaemonState, req: Request, url: URL): Promise<Response> {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function handleGit(state: DaemonState, req: Request, url: URL, server: any): Promise<Response> {
   const parsed = parseGitPath(url.pathname);
   if (!parsed) return textResponse(404, "not a mesh route");
 
@@ -718,6 +770,16 @@ async function handleGit(state: DaemonState, req: Request, url: URL): Promise<Re
     op = "pack";
   } else {
     return textResponse(404, "no such mesh route");
+  }
+
+  // git-receive-pack (push) is restricted to localhost — peers replicate by
+  // fetching (git-upload-pack), not by pushing.  Blocking remote pushes closes
+  // the unauthenticated-push → malicious-pipeline → RCE chain.
+  if (service === "git-receive-pack") {
+    const remoteIp = server?.requestIP?.(req)?.address ?? "";
+    if (!isLoopback(remoteIp)) {
+      return textResponse(403, "git push is only permitted from localhost");
+    }
   }
 
   const dir = repoStore.mirrorPath(state.root, parsed.repo);

@@ -22,6 +22,16 @@ const HTTP_TIMEOUT_MS = 10_000;
 const RETRY_TICK_SECS = 2;
 const RETRY_BACKOFF_MAX_SECS = 60;
 
+// Repo names must be simple identifiers — no path traversal, no URL schemes.
+// This gates what peer heartbeats can cause us to fetch.
+function isValidRepoName(name: string): boolean {
+  return typeof name === "string"
+    && name.length > 0
+    && name.length <= 100
+    && /^[a-zA-Z0-9._-]+$/.test(name)
+    && !name.includes("..");
+}
+
 // ---------- inbound frame handling ----------
 
 export async function handleInboundFrame(
@@ -39,10 +49,15 @@ export async function handleInboundFrame(
       peerEntry?.noteHeartbeat(null, msg.config_hash);
       if (peerEntry && msg.capabilities) peerEntry.capabilities = msg.capabilities;
       for (const r of msg.repos) {
+        if (!isValidRepoName(r.name)) {
+          console.warn(`peer ${sender}: ignoring invalid repo name ${JSON.stringify(r.name)}`);
+          continue;
+        }
         state.ensureRepo(r.name).noteSource(sender);
       }
-      scheduleReconcileIfStale(state, sender, msg.repos);
-      scheduleIssueSyncIfStale(state, sender, msg.repos);
+      const validRepos = msg.repos.filter((r) => isValidRepoName(r.name));
+      scheduleReconcileIfStale(state, sender, validRepos);
+      scheduleIssueSyncIfStale(state, sender, validRepos);
       state.notifyStatusChanged();
       break;
     case "RefUpdate":

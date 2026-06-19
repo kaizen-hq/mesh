@@ -2,9 +2,11 @@
 // mesh.toml and peer_addresses.toml are the canonical config format.
 
 import * as path from "node:path";
+import * as os from "node:os";
 import * as fs from "node:fs/promises";
 import * as toml from "./toml.ts";
 import { sha256Hex } from "./proto.ts";
+import type { RunnerConfig } from "./ci/types.ts";
 
 export interface SelfSection {
   name: string;
@@ -33,18 +35,55 @@ export interface Config {
   peers: PeerEntry[];
   repos: RepoEntry[];
   transport: TransportSection;
+  runner: RunnerConfig;
   raw_hash: string;
   source_path: string;
 }
 
 const DEFAULT_PEER_PORT = 7979;
 
+export const DEFAULT_RUNNER: RunnerConfig = {
+  enabled: true,
+  execution_modes: ["docker"],
+  labels: [],
+  max_concurrent_jobs: 2,
+  workdir: path.join(os.homedir(), ".mesh", "ci", "runs"),
+  tools: [],
+  env_passthrough: [],
+  log_stream_interval_ms: 500,
+  max_worktree_age_minutes: 60,
+  max_worktree_disk_mb: 2048,
+  log_retention_runs: 50,
+};
+
+const KNOWN_TOP_LEVEL = new Set(["self", "peers", "repos", "transport", "runner"]);
+const KNOWN_SELF = new Set(["name", "peer_port"]);
+const KNOWN_TRANSPORT = new Set(["tls", "poll_secs"]);
+const KNOWN_RUNNER = new Set([
+  "enabled", "execution_modes", "labels", "max_concurrent_jobs",
+  "workdir", "tools", "env_passthrough", "log_stream_interval_ms", "max_worktree_age_minutes",
+  "max_worktree_disk_mb", "log_retention_runs",
+]);
+const KNOWN_PEER = new Set(["name", "pubkey", "addresses", "address"]);
+const KNOWN_REPO = new Set(["name", "path", "branches"]);
+
+function warnUnknown(file: string, section: string, obj: Record<string, unknown>, known: Set<string>): void {
+  for (const key of Object.keys(obj)) {
+    if (!known.has(key)) {
+      console.warn(`WARN ${file}: unknown field "${section ? section + "." : ""}${key}"`);
+    }
+  }
+}
+
 export async function loadConfig(file: string): Promise<Config> {
   const raw = await fs.readFile(file, "utf8");
   const hash = sha256Hex(new TextEncoder().encode(raw));
   const t = toml.parse(raw) as Record<string, unknown>;
 
+  warnUnknown(file, "", t, KNOWN_TOP_LEVEL);
+
   const selfSec = (t["self"] ?? {}) as Record<string, unknown>;
+  warnUnknown(file, "self", selfSec, KNOWN_SELF);
   const name = typeof selfSec.name === "string" ? selfSec.name : "";
   if (!name.trim()) {
     throw new Error(`${file}: [self].name is required`);
@@ -54,6 +93,7 @@ export async function loadConfig(file: string): Promise<Config> {
 
   const peers = ((t["peers"] as unknown[]) ?? []).map((p) => {
     const o = p as Record<string, unknown>;
+    warnUnknown(file, "peers[]", o, KNOWN_PEER);
     // Accept both `address = "..."` (legacy) and `addresses = [...]` in TOML.
     const addresses: string[] = Array.isArray(o.addresses)
       ? o.addresses.filter((a): a is string => typeof a === "string")
@@ -69,6 +109,7 @@ export async function loadConfig(file: string): Promise<Config> {
 
   const repos = ((t["repos"] as unknown[]) ?? []).map((r) => {
     const o = r as Record<string, unknown>;
+    warnUnknown(file, "repos[]", o, KNOWN_REPO);
     return {
       name: String(o.name),
       path: String(o.path),
@@ -77,9 +118,39 @@ export async function loadConfig(file: string): Promise<Config> {
   });
 
   const tx = (t["transport"] ?? {}) as Record<string, unknown>;
+  warnUnknown(file, "transport", tx, KNOWN_TRANSPORT);
   const transport: TransportSection = {
     tls: typeof tx.tls === "boolean" ? tx.tls : true,
     poll_secs: typeof tx.poll_secs === "number" ? tx.poll_secs : 1,
+  };
+
+  const rr = (t["runner"] ?? {}) as Record<string, unknown>;
+  warnUnknown(file, "runner", rr, KNOWN_RUNNER);
+  const runner: RunnerConfig = {
+    enabled: typeof rr.enabled === "boolean" ? rr.enabled : DEFAULT_RUNNER.enabled,
+    execution_modes: Array.isArray(rr.execution_modes)
+      ? (rr.execution_modes as unknown[]).filter((m): m is string => typeof m === "string")
+      : DEFAULT_RUNNER.execution_modes,
+    labels: Array.isArray(rr.labels)
+      ? (rr.labels as unknown[]).filter((l): l is string => typeof l === "string")
+      : DEFAULT_RUNNER.labels,
+    max_concurrent_jobs:
+      typeof rr.max_concurrent_jobs === "number" ? rr.max_concurrent_jobs : DEFAULT_RUNNER.max_concurrent_jobs,
+    workdir: typeof rr.workdir === "string" ? rr.workdir : DEFAULT_RUNNER.workdir,
+    tools: Array.isArray(rr.tools)
+      ? (rr.tools as unknown[]).filter((t): t is string => typeof t === "string")
+      : DEFAULT_RUNNER.tools,
+    env_passthrough: Array.isArray(rr.env_passthrough)
+      ? (rr.env_passthrough as unknown[]).filter((v): v is string => typeof v === "string")
+      : DEFAULT_RUNNER.env_passthrough,
+    log_stream_interval_ms:
+      typeof rr.log_stream_interval_ms === "number" ? rr.log_stream_interval_ms : DEFAULT_RUNNER.log_stream_interval_ms,
+    max_worktree_age_minutes:
+      typeof rr.max_worktree_age_minutes === "number" ? rr.max_worktree_age_minutes : DEFAULT_RUNNER.max_worktree_age_minutes,
+    max_worktree_disk_mb:
+      typeof rr.max_worktree_disk_mb === "number" ? rr.max_worktree_disk_mb : DEFAULT_RUNNER.max_worktree_disk_mb,
+    log_retention_runs:
+      typeof rr.log_retention_runs === "number" ? rr.log_retention_runs : DEFAULT_RUNNER.log_retention_runs,
   };
 
   return {
@@ -87,6 +158,7 @@ export async function loadConfig(file: string): Promise<Config> {
     peers,
     repos,
     transport,
+    runner,
     raw_hash: hash,
     source_path: file,
   };
@@ -95,6 +167,10 @@ export async function loadConfig(file: string): Promise<Config> {
 export function seedConfig(myName: string, myPubkey: string): string {
   return toml.stringify({
     self: { name: myName },
+    runner: {
+      enabled: true,
+      execution_modes: ["docker"],
+    },
     peers: [{ name: myName, pubkey: myPubkey }],
     repos: [],
   });
@@ -104,6 +180,7 @@ export function seedConfig(myName: string, myPubkey: string): string {
 
 interface RawConfigDoc {
   self?: Record<string, unknown>;
+  runner?: Record<string, unknown>;
   peers?: Array<Record<string, unknown>>;
   repos?: Array<Record<string, unknown>>;
   transport?: Record<string, unknown>;
@@ -265,4 +342,39 @@ export function findPeer(cfg: Config, name: string): PeerEntry | undefined {
 
 export function findRepo(cfg: Config, name: string): RepoEntry | undefined {
   return cfg.repos.find((r) => r.name === name);
+}
+
+// ---------- pending_invites.json ----------
+// Persisted so a daemon restart doesn't silently invalidate in-flight invites.
+
+export interface PersistedInvite {
+  expiryMs: number;
+  address: string;
+}
+
+export async function loadPendingInvites(root: string): Promise<Map<string, PersistedInvite>> {
+  const file = path.join(root, "pending_invites.json");
+  try {
+    const raw = await fs.readFile(file, "utf8");
+    const obj = JSON.parse(raw) as Record<string, PersistedInvite>;
+    const now = Date.now();
+    const map = new Map<string, PersistedInvite>();
+    for (const [k, v] of Object.entries(obj)) {
+      if (typeof v?.expiryMs === "number" && v.expiryMs > now) {
+        map.set(k, v);
+      }
+    }
+    return map;
+  } catch {
+    return new Map();
+  }
+}
+
+export async function savePendingInvites(root: string, invites: Map<string, PersistedInvite>): Promise<void> {
+  const obj: Record<string, PersistedInvite> = {};
+  for (const [k, v] of invites) obj[k] = v;
+  const file = path.join(root, "pending_invites.json");
+  const tmp = file + ".tmp";
+  await fs.writeFile(tmp, JSON.stringify(obj), "utf8");
+  await fs.rename(tmp, file);
 }

@@ -3,10 +3,10 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Frame } from "./proto.ts";
-import type { Config, AddressCache } from "./config.ts";
-import { loadAddressCache, saveAddressCache } from "./config.ts";
+import type { Config, AddressCache, PersistedInvite } from "./config.ts";
+import { loadAddressCache, saveAddressCache, loadPendingInvites } from "./config.ts";
 import type { Identity } from "./identity.ts";
-import type { NodeCapabilities, CiState, CicdConfig } from "./ci/types.ts";
+import type { NodeCapabilities, CiState } from "./ci/types.ts";
 import { emptyCiState } from "./ci/types.ts";
 
 export interface Divergence {
@@ -86,10 +86,7 @@ export class OutboundQueue {
   }
 }
 
-export interface PendingInvite {
-  expiryMs: number;
-  address: string;
-}
+export type PendingInvite = PersistedInvite;
 
 export class DaemonState {
   root: string;
@@ -105,7 +102,7 @@ export class DaemonState {
   statusChangedCallbacks: Array<() => void> = [];
   // CI state
   ci: CiState = emptyCiState();
-  ciConfig: CicdConfig | null = null;
+  ciSecrets: Record<string, string> = {};
   ciCapabilities: NodeCapabilities | null = null;
   // Callbacks for CI run changes (SSE)
   ciRunChangedCallbacks: Array<(repo: string) => void> = [];
@@ -122,6 +119,7 @@ export class DaemonState {
   static async create(root: string, config: Config, identity: Identity): Promise<DaemonState> {
     const s = new DaemonState(root, config, identity);
     s.addressCache = await loadAddressCache(root);
+    s.pendingInvites = await loadPendingInvites(root);
     for (const p of config.peers) {
       if (p.name === config.self.name) continue;
       const entry = new PeerEntry();

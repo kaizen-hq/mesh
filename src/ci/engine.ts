@@ -153,7 +153,7 @@ async function runDockerJob(
   const args = ["compose", "-f", composeFile, "run", "--rm", ...envArgs, svc];
 
   try {
-    return await spawnAndLog("docker", args, {}, secrets, onLog);
+    return await spawnAndLog("docker", args, { env: buildDockerEnv(secrets) }, secrets, onLog);
   } finally {
     if (tmpComposeFile) {
       await fs.unlink(tmpComposeFile).catch(() => {});
@@ -161,17 +161,63 @@ async function runDockerJob(
   }
 }
 
+// ---------- docker execution environment ----------
+
+// Build a minimal, explicit environment for the docker CLI process. The host
+// process environment is NOT passed wholesale — only the vars the docker CLI
+// needs to locate the daemon socket, plus the job's secrets so that docker
+// compose ${VAR} substitution resolves from our explicit dict rather than
+// arbitrary host vars.
+function buildDockerEnv(secrets: Record<string, string>): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const key of [
+    "PATH", "HOME", "TMPDIR", "TMP", "TEMP",
+    "DOCKER_HOST", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "DOCKER_CONFIG",
+    "DOCKER_CONTEXT",
+  ]) {
+    const val = process.env[key];
+    if (val !== undefined) env[key] = val;
+  }
+  // Secrets overlay last: compose ${SECRET} substitution resolves here, not host env.
+  return { ...env, ...secrets };
+}
+
 // ---------- shell execution ----------
+
+// Build a minimal, explicit environment for shell jobs. The host process
+// environment is NOT inherited wholesale — only the baseline vars needed to
+// find tools and write temp files, plus whatever the operator declared in
+// [runner] env_passthrough, plus the job's secrets (highest priority).
+function buildShellEnv(
+  passthrough: string[],
+  secrets: Record<string, string>,
+): Record<string, string> {
+  const env: Record<string, string> = {};
+  // Always include enough to locate binaries and write temp files.
+  for (const key of ["PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL"]) {
+    const val = process.env[key];
+    if (val !== undefined) env[key] = val;
+  }
+  // Operator-declared host vars (SSH_AUTH_SOCK, GOPATH, DOCKER_HOST, etc.)
+  for (const key of passthrough) {
+    const val = process.env[key];
+    if (val !== undefined) env[key] = val;
+  }
+  // Secrets overlay last so they can never be shadowed by a host var.
+  return { ...env, ...secrets };
+}
 
 async function runShellJob(
   job: JobDefinition,
   worktree: string,
   secrets: Record<string, string>,
+  envPassthrough: string[],
   onLog: (line: string) => Promise<void>,
 ): Promise<number> {
+  const env = buildShellEnv(envPassthrough, secrets);
   let lastExit = 0;
   for (const cmd of job.commands) {
-    const exit = await spawnAndLog("sh", ["-c", cmd], { cwd: worktree, env: secrets }, secrets, onLog);
+    const exit = await spawnAndLog("sh", ["-c", cmd], { cwd: worktree, env }, secrets, onLog);
     if (exit !== 0) return exit;
     lastExit = exit;
   }
@@ -189,7 +235,7 @@ async function spawnAndLog(
 ): Promise<number> {
   const proc = Bun.spawn([cmd, ...args], {
     cwd: opts.cwd,
-    env: opts.env ? { ...process.env, ...opts.env } : undefined,
+    env: opts.env,
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -310,8 +356,8 @@ export async function runPipeline(
       }
 
       // Check if mode is allowed
-      if (jobDef.mode === "shell" && !runnerConfig.allow_shell) {
-        await appendLogChunk(root, run.repo, run.run_id, `[mesh-ci] job "${jobName}" requires shell mode but allow_shell=false\n`);
+      if (jobDef.mode === "shell" && !runnerConfig.execution_modes.includes("shell")) {
+        await appendLogChunk(root, run.repo, run.run_id, `[mesh-ci] job "${jobName}" requires shell mode but "shell" is not in execution_modes\n`);
         run.jobs[jobName]!.status = "failed";
         run.jobs[jobName]!.exit_code = 1;
         failed.add(jobName);
@@ -327,7 +373,7 @@ export async function runPipeline(
       let exitCode: number;
       try {
         if (jobDef.mode === "shell") {
-          exitCode = await runShellJob(jobDef, worktree, secrets, onLog);
+          exitCode = await runShellJob(jobDef, worktree, secrets, runnerConfig.env_passthrough, onLog);
         } else {
           exitCode = await runDockerJob(jobDef, jobName, worktree, secrets, onLog);
         }

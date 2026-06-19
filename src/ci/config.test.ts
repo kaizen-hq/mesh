@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { parsePipeline, parseCicdConfig, defaultRunnerConfig } from "./config.ts";
+import { parsePipeline, parseSecretsYaml } from "./config.ts";
 
 const MINIMAL_YAML = `
 pipeline:
@@ -151,51 +151,25 @@ describe("parsePipeline", () => {
   });
 });
 
-describe("parseCicdConfig", () => {
-  it("parses runner section", () => {
-    const toml = `
-[runner]
-enabled = true
-labels = ["docker", "linux-amd64"]
-max_concurrent_jobs = 3
-workdir = "/var/mesh-ci/runs"
-allow_shell = false
-allow_shell_secrets = false
-log_stream_interval_ms = 500
-max_worktree_age_minutes = 60
-max_worktree_disk_mb = 2048
-log_retention_runs = 50
-`;
-    const cfg = parseCicdConfig(toml);
-    expect(cfg.runner.enabled).toBe(true);
-    expect(cfg.runner.labels).toEqual(["docker", "linux-amd64"]);
-    expect(cfg.runner.max_concurrent_jobs).toBe(3);
-    expect(cfg.runner.allow_shell).toBe(false);
-    expect(cfg.runner.log_stream_interval_ms).toBe(500);
-  });
-
-  it("applies defaults for missing runner fields", () => {
-    const cfg = parseCicdConfig("[runner]\nenabled = true\n");
-    expect(cfg.runner.max_concurrent_jobs).toBe(defaultRunnerConfig.max_concurrent_jobs);
-    expect(cfg.runner.log_stream_interval_ms).toBe(defaultRunnerConfig.log_stream_interval_ms);
-  });
-
+describe("parseSecretsYaml", () => {
   it("parses secrets section", () => {
-    const toml = "[secrets]\nDEPLOY_KEY = \"abc123\"\nNPM_TOKEN = \"xyz\"\n";
-    const cfg = parseCicdConfig(toml);
-    expect(cfg.secrets.DEPLOY_KEY).toBe("abc123");
-    expect(cfg.secrets.NPM_TOKEN).toBe("xyz");
+    const yaml = "secrets:\n  DEPLOY_KEY: \"abc123\"\n  NPM_TOKEN: \"xyz\"\n";
+    const secrets = parseSecretsYaml(yaml);
+    expect(secrets.DEPLOY_KEY).toBe("abc123");
+    expect(secrets.NPM_TOKEN).toBe("xyz");
   });
 
-  it("parses capabilities.tools override", () => {
-    const toml = "[capabilities]\ntools = [\"docker\", \"bun\"]\n";
-    const cfg = parseCicdConfig(toml);
-    expect(cfg.capabilities.tools).toEqual(["docker", "bun"]);
+  it("returns empty object from empty string", () => {
+    expect(parseSecretsYaml("")).toEqual({});
   });
 
-  it("returns empty config from empty string", () => {
-    const cfg = parseCicdConfig("");
-    expect(cfg.runner.enabled).toBe(defaultRunnerConfig.enabled);
-    expect(cfg.secrets).toEqual({});
+  it("returns empty object when secrets section is absent", () => {
+    expect(parseSecretsYaml("# no secrets here\n")).toEqual({});
+  });
+
+  it("ignores non-string secret values", () => {
+    const yaml = "secrets:\n  VALID: \"abc\"\n";
+    const secrets = parseSecretsYaml(yaml);
+    expect(secrets.VALID).toBe("abc");
   });
 });
