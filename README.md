@@ -236,6 +236,26 @@ runner selection and assign jobs to others):
 enabled = false
 ```
 
+### Registering repos on runner nodes
+
+Every node that will **execute** jobs for a repo must have the repo cloned
+locally and registered in its `mesh.toml`. Mesh uses the registered path to
+create a git worktree for each run — if the path is missing, the job stays
+`pending`.
+
+```sh
+git clone <url> ~/src/my-app
+mesh add-repo my-app ~/src/my-app --branch main
+mesh reload
+```
+
+`mesh add-repo` writes the entry to `mesh.toml`. `mesh reload` makes the
+running daemon pick it up immediately without a restart.
+
+Nodes that are not runners (or have `enabled = false`) do not need the repo
+registered — they participate in assignment and show run history in the
+dashboard without executing anything locally.
+
 ### Secrets
 
 Node-local secrets (environment variables injected into jobs) live in
@@ -337,8 +357,9 @@ mesh reload
 
 ---
 
-### Pipeline triggered but jobs never start
+### Pipeline triggered but jobs never start / run stays `pending`
 
+- **Repo not registered on the runner.** The runner needs the repo cloned locally and registered in its `mesh.toml`. Without it, mesh logs `no reachable source for <repo>` and the run stays `pending`. Fix: clone the repo on the runner node and run `mesh add-repo <name> <path> --branch main && mesh reload`.
 - `mesh ci status <repo>` — if the run shows `pending` indefinitely, the runner received the assignment but hasn't started. Check the runner node's daemon logs.
 - `mesh ci runners` — verify the assigned runner shows `runner: true` and `jobs_running` below `max_concurrent_jobs`.
 - If `execution_modes` on the runner doesn't include the mode the job requires (`docker` or `shell`), the job will fail immediately with a log line like `job "X" requires shell mode but "shell" is not in execution_modes`.

@@ -43,6 +43,7 @@ export class PeerEntry {
   lastPostSeen: number | null = null;
   lastConfigHash: string | null = null;
   lastIssueSyncMs: number | null = null; // epoch ms of last successful issue full-sync pull
+  lastCiSyncMs: number | null = null;    // epoch ms of last successful CI runs full-sync pull
   capabilities: NodeCapabilities | null = null;
 
   isConnected(): boolean {

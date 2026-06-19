@@ -17,6 +17,8 @@ import * as repoStore from "./repo_store.ts";
 import * as git from "./git.ts";
 import * as issues from "./issues.ts";
 import * as scheduler from "./ci/scheduler.ts";
+import { saveRun } from "./ci/store.ts";
+import type { PipelineRun } from "./ci/types.ts";
 
 const HTTP_TIMEOUT_MS = 10_000;
 const RETRY_TICK_SECS = 2;
@@ -58,6 +60,7 @@ export async function handleInboundFrame(
       const validRepos = msg.repos.filter((r) => isValidRepoName(r.name));
       scheduleReconcileIfStale(state, sender, validRepos);
       scheduleIssueSyncIfStale(state, sender, validRepos);
+      scheduleCiSyncIfStale(state, sender, validRepos);
       state.notifyStatusChanged();
       break;
     case "RefUpdate":
@@ -120,6 +123,7 @@ function handleCiRunUpdate(state: DaemonState, msg: import("./proto.ts").CiMessa
       if (run) {
         run.status = "running";
         run.runner = msg.runner;
+        void saveRun(state.root, run);
         state.notifyCiRunChanged(msg.repo);
       }
       break;
@@ -129,6 +133,7 @@ function handleCiRunUpdate(state: DaemonState, msg: import("./proto.ts").CiMessa
       if (run) {
         run.status = msg.status;
         run.completed_at = new Date().toISOString();
+        void saveRun(state.root, run);
         state.notifyCiRunChanged(msg.repo);
       }
       break;
@@ -516,5 +521,76 @@ function scheduleIssueSyncIfStale(
       }
     }
     entry.lastIssueSyncMs = now;
+  })();
+}
+
+// ---------- CI run full sync (pull) ----------
+
+export async function pullCiRunsFromPeer(
+  state: DaemonState,
+  peer: string,
+  repo: string,
+): Promise<void> {
+  const entry = state.peers.get(peer);
+  if (!entry || entry.addresses.length === 0) return;
+
+  for (const addr of entry.addresses) {
+    const { baseUrl } = normalizePeerUrl(addr, state.config.transport.tls);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
+    const init: RequestInit & { tls?: { rejectUnauthorized: boolean } } = {
+      signal: controller.signal,
+      tls: { rejectUnauthorized: false },
+    };
+    try {
+      const resp = await fetch(
+        `${baseUrl}/mesh/ci/${encodeURIComponent(repo)}/runs`,
+        init,
+      );
+      if (!resp.ok) continue;
+      const peerRuns = (await resp.json()) as PipelineRun[];
+      for (const run of peerRuns) {
+        // Only persist runs we don't already have on disk, or where the peer
+        // has a terminal status and we have a non-terminal one (stale in-memory).
+        const existing = state.ci.runs.get(run.run_id);
+        const isTerminal = (s: string) => s === "passed" || s === "failed" || s === "cancelled";
+        if (!existing || (!isTerminal(existing.status) && isTerminal(run.status))) {
+          state.ci.runs.set(run.run_id, run);
+          await saveRun(state.root, run);
+        }
+      }
+      state.notifyCiRunChanged(repo);
+      return;
+    } catch (e) {
+      console.debug(`ci sync ${peer}/${repo} at ${addr} failed:`, (e as Error).message);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+}
+
+function scheduleCiSyncIfStale(
+  state: DaemonState,
+  peer: string,
+  advertised: RepoStatus[],
+): void {
+  const entry = state.peers.get(peer);
+  if (!entry) return;
+  const now = Date.now();
+  // Throttle: only pull once per minute per peer
+  if (entry.lastCiSyncMs !== null && now - entry.lastCiSyncMs < 60_000) return;
+
+  void (async () => {
+    // Pull CI runs for all repos this peer knows about, not just repos we
+    // have locally — we want run history even if we're not a runner for the repo.
+    for (const r of advertised) {
+      if (!isValidRepoName(r.name)) continue;
+      try {
+        await pullCiRunsFromPeer(state, peer, r.name);
+      } catch (e) {
+        console.debug(`ci sync ${peer}/${r.name} failed:`, (e as Error).message);
+      }
+    }
+    entry.lastCiSyncMs = now;
   })();
 }
