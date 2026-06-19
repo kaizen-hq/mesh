@@ -385,10 +385,11 @@ async function handleCiPipelinesTab(state: DaemonState, repo: string): Promise<R
   const pipeline = repoAbsPath ? await loadPipeline(repoAbsPath).catch(() => null) : null;
 
   // Merge in-memory runs (current session) with persisted runs from disk so the
-  // list survives daemon restarts. In-memory takes precedence for live status.
+  // list survives daemon restarts and is visible on peers that don't have the
+  // repo checked out locally. In-memory takes precedence for live status.
   const inMemRuns = [...state.ci.runs.values()].filter((r) => r.repo === repo);
   const inMemIds = new Set(inMemRuns.map((r) => r.run_id));
-  const diskIndex = pipeline ? await listRuns(state.root, repo) : [];
+  const diskIndex = await listRuns(state.root, repo);
   const diskRuns = (
     await Promise.all(
       diskIndex
@@ -400,7 +401,11 @@ async function handleCiPipelinesTab(state: DaemonState, repo: string): Promise<R
   const allRuns = [...inMemRuns, ...diskRuns]
     .sort((a, b) => (a.started_at > b.started_at ? -1 : 1));
 
-  return new Response(renderCiPipelinesPage(state, repo, allRuns, pipeline !== null), {
+  // Show the runs table whenever runs exist, even if this node doesn't have the
+  // repo checked out locally (e.g. a peer that received gossiped run state).
+  const hasPipeline = pipeline !== null || allRuns.length > 0;
+
+  return new Response(renderCiPipelinesPage(state, repo, allRuns, hasPipeline), {
     status: 200,
     headers: { "content-type": "text/html; charset=utf-8" },
   });

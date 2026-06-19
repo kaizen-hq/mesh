@@ -153,11 +153,6 @@ async function dispatch(state: DaemonState, req: ControlRequest): Promise<Contro
       } catch (e) {
         return { type: "error", message: (e as Error).message };
       }
-    case "add_peer":
-      return {
-        type: "error",
-        message: "mesh add-peer: not yet implemented (edit mesh.toml and `mesh reload`)",
-      };
     case "add_address": {
       const peer = String(req.peer ?? "");
       const address = String(req.address ?? "");
