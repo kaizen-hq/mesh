@@ -108,25 +108,20 @@ export interface CronClaim {
   started: boolean;
 }
 
-// ---------- node-level runner config (from cicd.toml) ----------
+// ---------- node-level runner config (from mesh.toml [runner]) ----------
 
 export interface RunnerConfig {
   enabled: boolean;
+  execution_modes: string[];
   labels: string[];
   max_concurrent_jobs: number;
   workdir: string;
-  allow_shell: boolean;
-  allow_shell_secrets: boolean;
+  tools: string[];
+  env_passthrough: string[];
   log_stream_interval_ms: number;
   max_worktree_age_minutes: number;
   max_worktree_disk_mb: number;
   log_retention_runs: number;
-}
-
-export interface CicdConfig {
-  runner: RunnerConfig;
-  capabilities: { tools?: string[] };
-  secrets: Record<string, string>;
 }
 
 export function emptyCiState(): CiState {

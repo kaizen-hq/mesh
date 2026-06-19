@@ -13,7 +13,9 @@ import {
   addPeerToConfig,
   addRepoToConfig,
   normalizePeerUrl,
+  savePendingInvites,
 } from "./config.ts";
+import { loadSecretsConfig, detectTools } from "./ci/config.ts";
 import {
   buildInviteToken,
   buildJoinRequest,
@@ -101,6 +103,8 @@ export async function run(state: DaemonState): Promise<net.Server> {
     server.once("error", rej);
     server.listen(sockPath, () => res());
   });
+  // Restrict socket to owner-only so other local users cannot send control commands.
+  await fs.chmod(sockPath, 0o600);
   console.log(`control socket listening at ${sockPath}`);
   return server;
 }
@@ -138,6 +142,13 @@ async function dispatch(state: DaemonState, req: ControlRequest): Promise<Contro
         state.config = next;
         state.refreshPeers();
         await repoStore.ensureMirrors(state);
+        state.ciSecrets = await loadSecretsConfig(state.root);
+        const tools = await detectTools(next.runner.tools.length > 0 ? next.runner.tools : undefined);
+        if (state.ciCapabilities) {
+          state.ciCapabilities.labels = next.runner.labels;
+          state.ciCapabilities.runner = next.runner.enabled;
+          state.ciCapabilities.tools = tools;
+        }
         return { type: "ok" };
       } catch (e) {
         return { type: "error", message: (e as Error).message };
@@ -229,6 +240,7 @@ async function dispatch(state: DaemonState, req: ControlRequest): Promise<Contro
           address,
         });
         sweepExpiredInvites(state);
+        await savePendingInvites(state.root, state.pendingInvites);
         return {
           type: "invite",
           token: encodeInviteToken(token),

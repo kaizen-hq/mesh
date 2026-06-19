@@ -92,7 +92,7 @@ function peerCapabilities(state: DaemonState): PeerCapabilityEntry[] {
       jobs_running: caps.load.jobs_running,
       cpu_percent: caps.load.cpu_percent,
       mem_free_mb: caps.load.mem_free_mb,
-      max_concurrent_jobs: state.ciConfig?.runner.max_concurrent_jobs ?? 2,
+      max_concurrent_jobs: state.config.runner.max_concurrent_jobs,
     });
   }
   return entries;
@@ -217,8 +217,8 @@ async function runLocalPipeline(state: DaemonState, pipeline: Pipeline, run: Pip
   const completed = await runPipeline(pipeline, run, {
     root: state.root,
     repoPath: worktreePath,
-    runnerConfig: state.ciConfig!.runner,
-    secrets: state.ciConfig!.secrets,
+    runnerConfig: state.config.runner,
+    secrets: state.ciSecrets,
     onRunUpdate: async (updated) => {
       state.ci.runs.set(updated.run_id, updated);
       state.notifyCiRunChanged(updated.repo);
@@ -281,7 +281,7 @@ export async function handleAssignment(
   msg: Extract<CiMessage, { type: "CiAssignment" }>,
   sender?: string,
 ): Promise<void> {
-  const cfg = state.ciConfig;
+  const cfg = state.config.runner;
   const me = state.config.self.name;
 
   const decline = async (reason: string) => {
@@ -305,10 +305,10 @@ export async function handleAssignment(
     } catch { /* best effort */ }
   };
 
-  if (!cfg?.runner.enabled) { await decline("runner not enabled"); return; }
+  if (!cfg.enabled) { await decline("runner not enabled"); return; }
 
   const running = [...state.ci.runs.values()].filter((r) => r.status === "running").length;
-  if (running >= cfg.runner.max_concurrent_jobs) { await decline("at capacity"); return; }
+  if (running >= cfg.max_concurrent_jobs) { await decline("at capacity"); return; }
 
   // Send CiAccepted back to sender
   if (sender) {

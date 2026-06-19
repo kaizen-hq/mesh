@@ -1,30 +1,14 @@
-// Parse and validate ~/.mesh/cicd.toml and in-repo .mesh/mesh-ci.yml.
-// Also provides tool auto-detection.
+// Parse and validate in-repo .mesh/mesh-ci.yml and ~/.mesh/secrets.yml.
+// Also provides tool auto-detection. YAML parsing via Bun.YAML.
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import * as os from "node:os";
-import * as toml from "../toml.ts";
-import { parse as parseYaml } from "./yaml.ts";
-import type { Pipeline, JobDefinition, RunnerConfig, CicdConfig } from "./types.ts";
-
-export const defaultRunnerConfig: RunnerConfig = {
-  enabled: false,
-  labels: [],
-  max_concurrent_jobs: 2,
-  workdir: path.join(os.homedir(), ".mesh", "ci", "runs"),
-  allow_shell: false,
-  allow_shell_secrets: false,
-  log_stream_interval_ms: 500,
-  max_worktree_age_minutes: 60,
-  max_worktree_disk_mb: 2048,
-  log_retention_runs: 50,
-};
+import type { Pipeline, JobDefinition } from "./types.ts";
 
 // ---------- mesh-ci.yml parser ----------
 
 export function parsePipeline(src: string): Pipeline {
-  const doc = parseYaml(src) as Record<string, unknown>;
+  const doc = Bun.YAML.parse(src) as Record<string, unknown>;
 
   const pipelineSec = (doc.pipeline ?? {}) as Record<string, unknown>;
   const name = typeof pipelineSec.name === "string" ? pipelineSec.name.trim() : "";
@@ -87,65 +71,54 @@ export function parsePipeline(src: string): Pipeline {
   };
 }
 
-// ---------- cicd.toml parser ----------
+// ---------- secrets.yml parser ----------
 
-export function parseCicdConfig(src: string): CicdConfig {
-  const doc = (src.trim() ? toml.parse(src) : {}) as Record<string, unknown>;
+const KNOWN_SECRETS_KEYS = new Set(["secrets"]);
 
-  const runnerRaw = (doc.runner ?? {}) as Record<string, unknown>;
-  const runner: RunnerConfig = {
-    enabled: runnerRaw.enabled === true,
-    labels: Array.isArray(runnerRaw.labels) ? (runnerRaw.labels as string[]) : defaultRunnerConfig.labels,
-    max_concurrent_jobs:
-      typeof runnerRaw.max_concurrent_jobs === "number"
-        ? runnerRaw.max_concurrent_jobs
-        : defaultRunnerConfig.max_concurrent_jobs,
-    workdir:
-      typeof runnerRaw.workdir === "string" ? runnerRaw.workdir : defaultRunnerConfig.workdir,
-    allow_shell: runnerRaw.allow_shell === true,
-    allow_shell_secrets: runnerRaw.allow_shell_secrets === true,
-    log_stream_interval_ms:
-      typeof runnerRaw.log_stream_interval_ms === "number"
-        ? runnerRaw.log_stream_interval_ms
-        : defaultRunnerConfig.log_stream_interval_ms,
-    max_worktree_age_minutes:
-      typeof runnerRaw.max_worktree_age_minutes === "number"
-        ? runnerRaw.max_worktree_age_minutes
-        : defaultRunnerConfig.max_worktree_age_minutes,
-    max_worktree_disk_mb:
-      typeof runnerRaw.max_worktree_disk_mb === "number"
-        ? runnerRaw.max_worktree_disk_mb
-        : defaultRunnerConfig.max_worktree_disk_mb,
-    log_retention_runs:
-      typeof runnerRaw.log_retention_runs === "number"
-        ? runnerRaw.log_retention_runs
-        : defaultRunnerConfig.log_retention_runs,
-  };
+// Interpolate ${VAR_NAME} references from the process environment.
+// Values that are env var references (e.g. "${NPM_TOKEN}") are never stored
+// in the file — only the variable name is, so plaintext secrets stay in the
+// environment rather than on disk.
+function interpolateEnv(value: string, file?: string): string {
+  return value.replace(/\$\{([^}]+)\}/g, (_, name: string) => {
+    const val = process.env[name];
+    if (val === undefined) {
+      console.warn(`WARN ${file ?? "secrets.yml"}: env var "\${${name}}" is not set`);
+    }
+    return val ?? "";
+  });
+}
 
-  const capRaw = (doc.capabilities ?? {}) as Record<string, unknown>;
-  const capabilities = {
-    tools: Array.isArray(capRaw.tools) ? (capRaw.tools as string[]) : undefined,
-  };
-
+export function parseSecretsYaml(src: string, file?: string): Record<string, string> {
+  if (!src.trim()) return {};
+  const parsed = Bun.YAML.parse(src);
+  if (parsed == null || typeof parsed !== "object") return {};
+  const doc = parsed as Record<string, unknown>;
+  if (file) {
+    for (const key of Object.keys(doc)) {
+      if (!KNOWN_SECRETS_KEYS.has(key)) {
+        console.warn(`WARN ${file}: unknown field "${key}"`);
+      }
+    }
+  }
   const secretsRaw = (doc.secrets ?? {}) as Record<string, unknown>;
   const secrets: Record<string, string> = {};
   for (const [k, v] of Object.entries(secretsRaw)) {
-    if (typeof v === "string") secrets[k] = v;
+    if (typeof v === "string") secrets[k] = interpolateEnv(v, file);
   }
-
-  return { runner, capabilities, secrets };
+  return secrets;
 }
 
 // ---------- load helpers ----------
 
-export async function loadCicdConfig(root: string): Promise<CicdConfig> {
-  const p = path.join(root, "cicd.toml");
+export async function loadSecretsConfig(root: string): Promise<Record<string, string>> {
+  const p = path.join(root, "secrets.yml");
   try {
     const src = await fs.readFile(p, "utf8");
-    return parseCicdConfig(src);
+    return parseSecretsYaml(src, p);
   } catch (e: unknown) {
-    if ((e as { code?: string }).code === "ENOENT") return parseCicdConfig("");
-    throw e;
+    if ((e as { code?: string }).code === "ENOENT") return {};
+    throw new Error(`${path.join(root, "secrets.yml")}: ${(e as Error).message}`);
   }
 }
 

@@ -18,7 +18,7 @@ import { buildZip, meshRoot, isCompiledBinary } from "./package_source.ts";
 import { runUpdate } from "./update.ts";
 import { runUpdateCode } from "./update_code.ts";
 import { runAddRepos } from "./add_repos.ts";
-import { loadCicdConfig, detectTools } from "./ci/config.ts";
+import { loadSecretsConfig, detectTools } from "./ci/config.ts";
 import { checkCronSlots, type CronJobSpec } from "./ci/cron.ts";
 import pkg from "../package.json" with { type: "json" };
 
@@ -325,15 +325,15 @@ async function cmdStart(root: string, args: Args) {
   const state = await DaemonState.create(root, cfg, id);
   await repoStore.ensureMirrors(state);
 
-  // Load CI config and detect capabilities
-  state.ciConfig = await loadCicdConfig(root);
-  const tools = await detectTools(state.ciConfig.capabilities.tools);
+  // Load secrets and detect capabilities from runner config in mesh.toml
+  state.ciSecrets = await loadSecretsConfig(root);
+  const tools = await detectTools(cfg.runner.tools.length > 0 ? cfg.runner.tools : undefined);
   state.ciCapabilities = {
     os: process.platform,
     arch: process.arch,
-    labels: state.ciConfig.runner.labels,
+    labels: cfg.runner.labels,
     tools,
-    runner: state.ciConfig.runner.enabled,
+    runner: cfg.runner.enabled,
     load: { jobs_running: 0, cpu_percent: 0, mem_free_mb: 0 },
   };
 

@@ -1,6 +1,6 @@
 # mesh — Bun/TypeScript peer-to-peer git daemon
 
-- One HTTP listener on `:7979` (plain HTTP by default; HTTPS opt-in).
+- One HTTPS listener on `:7979` (HTTPS by default; HTTP opt-in via `transport.tls = false`).
 - Routes: git smart-HTTP at `/<repo>.git/...`, `POST /mesh/frame` for signed
   notifications, `GET /status` for the browser dashboard.
 - Push-only peer link with retry queue + exponential backoff.
@@ -71,15 +71,24 @@ bun run build       # writes ./mesh
 ## Use
 
 ```sh
-mesh init                              # generate identity, seed mesh.toml
-mesh pubkey                            # print your public key (share with teammates)
-mesh start                             # run the daemon in the foreground
-mesh status                            # show peers, repos, divergences
-mesh add-peer <name> <pubkey> [addr]   # manually add a peer
-mesh add-repo <name> <path>            # contribute a working copy
-mesh invite --addr HOST:PORT           # generate a one-time pairing token
-mesh join <token>                      # accept a pairing token
-mesh sync                              # force a reconciliation round
+mesh init                                     # generate identity, seed mesh.toml
+mesh pubkey                                   # print your public key (share with teammates)
+mesh start                                    # run the daemon in the foreground
+mesh stop                                     # stop the running daemon
+mesh status                                   # show peers, repos, divergences
+mesh peers                                    # list configured peers + reachability
+mesh repos                                    # list repos + sync freshness
+mesh reload                                   # re-read mesh.toml and secrets.yml without restarting
+mesh sync                                     # force a reconciliation round
+mesh add-peer <name> <pubkey> [addr]          # manually add a peer
+mesh add-repo <name> <path> [--branch B ...]  # contribute a working copy
+mesh add-repos <parent-dir>                   # scan a directory and add all git repos
+mesh add-address <peer> <addr>                # bootstrap a known address for a peer
+mesh invite --addr HOST:PORT [--ttl SECS]     # generate a one-time pairing token (default TTL: 600s)
+mesh join <token>                             # accept a pairing token
+mesh url <repo>                               # print the local git URL for a repo
+mesh update                                   # update mesh binary from current serve-install peer
+mesh update-code                              # update mesh source from current serve-install-code peer
 
 # CI/CD
 mesh ci status [<repo>]                # show recent pipeline runs
@@ -92,8 +101,8 @@ mesh ci runners                        # list peers and their CI capabilities
 ## CI/CD
 
 Mesh includes a distributed CI/CD system. Pipelines are defined per-repo and
-executed across peers. Any peer with `runner.enabled = true` in `cicd.toml`
-can accept jobs.
+executed across peers. Every node is a runner by default — runner configuration
+lives in the `[runner]` section of `~/.mesh/mesh.toml`.
 
 > **Example repo:** [`kaizen-hq/hello-pipeline`](https://github.com/kaizen-hq/hello-pipeline)
 > is a minimal working example — a Bun HTTP server with a `Dockerfile`,
@@ -126,6 +135,7 @@ jobs:
     commands:
       - bun install --frozen-lockfile
       - bun test
+    secrets: [NPM_TOKEN]   # injected from ~/.mesh/secrets.yml on the runner node
 
   build:
     image: oven/bun:1.1
@@ -134,7 +144,7 @@ jobs:
     depends_on: [test]     # topological ordering; build waits for test
 
   nightly:
-    mode: shell            # run commands directly (no Docker)
+    mode: shell            # run commands directly on the runner host (no Docker)
     commands:
       - bun run audit
 ```
@@ -145,36 +155,111 @@ commands in a subprocess on the runner host.
 `depends_on` supports arbitrary DAGs. Cycles are rejected at parse time.
 Jobs whose upstream failed are automatically marked `skipped`.
 
+### Runner routing (`runner.labels` and `runner.fallback`)
+
+The `runner:` section in `mesh-ci.yml` controls which nodes in the mesh are
+eligible to run the pipeline's jobs.
+
+**`labels`** is matched against the `labels` list each node advertises in its
+`~/.mesh/mesh.toml [runner]` section. A pipeline with `labels: [docker]` will
+only be assigned to nodes that include `"docker"` in their runner labels.
+An empty list `[]` means no label requirement — every enabled runner is eligible.
+
+Use labels to route pipelines to dedicated build machines:
+
+```toml
+# On the dedicated build box — ~/.mesh/mesh.toml
+[runner]
+labels = ["docker", "linux"]
+```
+
+```yaml
+# In the repo — .mesh/mesh-ci.yml
+runner:
+  labels: [docker]   # only runs on nodes advertising "docker"
+```
+
+**`fallback`** defines what happens when no labeled runner is currently
+available (offline, at capacity, or no nodes match the label):
+
+| Value | Behavior |
+|-------|----------|
+| `any` | Fall back to any enabled runner in the mesh, regardless of labels |
+| `none` | Do not run — the assignment is dropped; the pipeline will not execute until manually triggered again |
+
+`fallback: none` is appropriate for jobs that must not run on general-purpose
+machines (e.g. a deployment job that requires specific credentials or network
+access). `fallback: any` is safe for most CI pipelines where any capable node
+is fine.
+
 ### Runner configuration
 
-Each node that should accept jobs needs `~/.mesh/cicd.toml`:
+Runner configuration lives in the `[runner]` section of `~/.mesh/mesh.toml`,
+seeded by `mesh init`:
 
 ```toml
 [runner]
 enabled             = true
-labels              = ["docker", "linux-amd64"]
-max_concurrent_jobs = 4
-workdir             = "/tmp/mesh-ci"   # where worktrees are checked out
-allow_shell         = true             # permit mode: shell jobs
-allow_shell_secrets = false            # inject secrets into shell jobs
+execution_modes     = ["docker"]       # permit "docker", "shell", or both
+labels              = []               # empty = matches any job; set for dedicated runners
+max_concurrent_jobs = 2
+workdir             = "~/.mesh/ci/runs"   # where worktrees are checked out
+
+# Host environment variables that shell jobs are allowed to read.
+# Shell jobs run in an isolated environment; only vars listed here (plus
+# PATH, HOME, TMPDIR, LANG, LC_ALL) are passed through from the host.
+# env_passthrough = ["GOPATH", "SSH_AUTH_SOCK", "DOCKER_HOST"]
+
+# Tool auto-detection (docker, bun, node, python3, go, cargo)
+# Override if auto-detect is wrong for your setup:
+# tools = ["docker", "bun"]
 
 # Tuning
-log_stream_interval_ms  = 500
+log_stream_interval_ms   = 500
 max_worktree_age_minutes = 60
 max_worktree_disk_mb     = 2048
 log_retention_runs       = 50
-
-[capabilities]
-# Override auto-detected tools (docker, bun, node, python3, go, cargo)
-# tools = ["docker", "bun"]
-
-[secrets]
-NPM_TOKEN = "..."
 ```
 
-Nodes without `cicd.toml`, or with `enabled = false`, participate in runner
-selection gossip (so they can assign jobs to others) but will not execute jobs
-themselves.
+To permit shell jobs (commands run directly on the host, not in Docker):
+
+```toml
+[runner]
+execution_modes = ["docker", "shell"]
+```
+
+To opt a node out of running jobs entirely (it will still participate in
+runner selection and assign jobs to others):
+
+```toml
+[runner]
+enabled = false
+```
+
+### Secrets
+
+Node-local secrets (environment variables injected into jobs) live in
+`~/.mesh/secrets.yml` — a separate file kept off version control:
+
+```yaml
+secrets:
+  NPM_TOKEN: "${NPM_TOKEN}"   # resolved from the daemon's environment at load time
+  DEPLOY_KEY: "literal-value"
+```
+
+Values can be literal strings or `${ENV_VAR}` references — mesh reads the
+named variable from the daemon's environment when `secrets.yml` is loaded (or
+reloaded). This keeps plaintext secrets out of the file: only the variable
+name is stored on disk; the value lives solely in the environment.
+
+`mesh reload` picks up both `mesh.toml` and `secrets.yml` without restarting
+the daemon.
+
+**Environment isolation.** Shell jobs run with a minimal environment: only
+`PATH`, `HOME`, `TMPDIR`, `LANG`, `LC_ALL`, variables listed in
+`[runner] env_passthrough`, and the job's declared secrets. Docker jobs pass
+the same limited set to the `docker` CLI so that compose variable substitution
+only resolves declared secrets, not arbitrary host variables.
 
 ### How it works
 
@@ -217,6 +302,84 @@ The browser dashboard at `/status` links to per-repo views:
 
 Both the pipelines page and the issues board have a shared nav bar:
 **issues · pipelines**.
+
+## Troubleshooting
+
+### Peers not connecting
+
+**Check reachability first.**
+```sh
+mesh peers          # shows each peer's last-seen time and address
+mesh status         # shows divergence count per peer
+```
+
+If a peer shows `never` or a stale timestamp:
+- Confirm the address is correct: `mesh add-address <peer> <host:port>` to add or correct it.
+- Verify the target node is running: `curl -k https://HOST:7979/status` should return HTML.
+- If TLS is disabled on one side but not the other, the connection will fail silently. Both nodes must agree: either both use `transport.tls = true` (default) or both set `false`.
+- Self-signed certificates are used by default. TLS verification is intentionally disabled between peers — this is expected behavior.
+
+**Check the peer's public key.**
+Frames are ed25519-signed and rejected if the signature doesn't match the configured pubkey. If you recently re-initialized a peer (`mesh init` on an existing node), its pubkey changes. Update it:
+```sh
+mesh add-peer <name> <new-pubkey>
+mesh reload
+```
+
+---
+
+### Pipeline doesn't trigger on push
+
+1. **Branch filter.** Check `on.push.branches` in `mesh-ci.yml` matches the branch you pushed to. Glob patterns like `"release/*"` must be quoted in YAML.
+2. **No eligible runner.** Run `mesh ci runners` to see which nodes are online and their capabilities. If the list is empty or all nodes have `enabled = false`, no assignment will be made.
+3. **Label mismatch.** If `runner.labels` in `mesh-ci.yml` specifies a label that no online node advertises, and `fallback` is `none`, the pipeline is silently dropped. Change to `fallback: any` or add the label to a node's `mesh.toml`.
+4. **`mesh-ci.yml` not found.** The file must be at `.mesh/mesh-ci.yml` relative to the repo root and committed — mesh reads it from the git object store, not the working tree.
+
+---
+
+### Pipeline triggered but jobs never start
+
+- `mesh ci status <repo>` — if the run shows `pending` indefinitely, the runner received the assignment but hasn't started. Check the runner node's daemon logs.
+- `mesh ci runners` — verify the assigned runner shows `runner: true` and `jobs_running` below `max_concurrent_jobs`.
+- If `execution_modes` on the runner doesn't include the mode the job requires (`docker` or `shell`), the job will fail immediately with a log line like `job "X" requires shell mode but "shell" is not in execution_modes`.
+
+---
+
+### Job fails immediately / exit code 1 with no output
+
+- **Docker not found.** For `mode: docker` jobs, `docker` must be on `PATH` on the runner node. Check with `mesh ci runners` — the `tools` list shows what was auto-detected.
+- **Image pull failure.** The runner must have internet access (or registry access) to pull the image. Check the job log: `mesh ci logs <repo> <run_id>`.
+- **Shell env missing a tool.** Shell jobs run with a minimal environment. If a command depends on a host tool or env var that isn't in the baseline (`PATH`, `HOME`, `TMPDIR`, `LANG`, `LC_ALL`), add it to `env_passthrough` in `mesh.toml` and run `mesh reload`.
+
+---
+
+### Secrets not injected / empty in job
+
+- The secret must be declared in the job's `secrets:` list in `mesh-ci.yml` and defined in `~/.mesh/secrets.yml` on the runner node (not the triggering node).
+- If using `${ENV_VAR}` interpolation in `secrets.yml`, the variable must be set in the environment of the mesh daemon process itself — not just in your shell. Restart or reload after setting it: `mesh reload`.
+- Run `mesh ci logs <repo> <run_id>` and look for `WARN secrets.yml: env var "${X}" is not set` lines emitted at daemon startup or reload.
+
+---
+
+### Worktree left behind / disk fills up
+
+Worktrees are created under `workdir` (default `~/.mesh/ci/runs`) and removed when a run completes. If the daemon crashed mid-run, orphaned worktrees may remain.
+
+```sh
+ls ~/.mesh/ci/runs          # list worktrees
+git worktree list           # from inside the repo, see all registered worktrees
+git worktree prune          # remove stale registrations
+```
+
+`max_worktree_age_minutes` and `max_worktree_disk_mb` in `mesh.toml` control automatic cleanup of old runs. Lower these values on space-constrained nodes.
+
+---
+
+### Config changes not taking effect
+
+`mesh reload` re-reads `mesh.toml` and `secrets.yml` without restarting the daemon. It does **not** re-read `mesh-ci.yml` — that file lives in the repo and is read fresh on each pipeline trigger.
+
+If `mesh reload` reports no error but behavior doesn't change, check that you edited the correct file. With multiple instances (`--root`), each instance has its own `mesh.toml`.
 
 ## Releasing
 

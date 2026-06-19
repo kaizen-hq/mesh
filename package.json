@@ -1,6 +1,6 @@
 {
   "name": "mesh",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "A peer-to-peer git daemon.",
   "type": "module",
   "private": true,
