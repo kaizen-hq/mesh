@@ -1,12 +1,17 @@
 // Subprocess log capture, batching, and CiLog frame broadcast.
 
-import type { Daemon } from "../daemon.ts";
+import type { CiDomain } from "./ci_domain.ts";
 import type { LogBuffer, LogChunk } from "./types.ts";
 import { appendLogChunk } from "./store.ts";
 
+export interface LogStreamCtx {
+  ci: CiDomain;
+  root: string;
+}
+
 // ---------- log buffer management ----------
 
-export function getOrCreateBuffer(state: Daemon, runId: string): LogBuffer {
+export function getOrCreateBuffer(state: LogStreamCtx, runId: string): LogBuffer {
   let buf = state.ci.getLogBuffer(runId);
   if (!buf) {
     buf = { run_id: runId, chunks: [], next_seq: 0 };
@@ -33,7 +38,7 @@ export function appendToBuffer(
 // ---------- flush loop ----------
 
 export function startFlushLoop(
-  state: Daemon,
+  state: LogStreamCtx,
   runId: string,
   repo: string,
   intervalMs: number,
@@ -51,7 +56,7 @@ export function startFlushLoop(
 }
 
 async function flushBuffer(
-  state: Daemon,
+  state: LogStreamCtx,
   buf: LogBuffer,
   repo: string,
   broadcast: (chunk: LogChunk) => void,
@@ -67,7 +72,7 @@ async function flushBuffer(
 // ---------- log capture from a Bun.Subprocess ----------
 
 export async function captureProcessLogs(
-  state: Daemon,
+  state: LogStreamCtx,
   runId: string,
   repo: string,
   proc: ReturnType<typeof Bun.spawn>,

@@ -4,7 +4,6 @@
 import * as path from "node:path";
 import * as fs from "node:fs/promises";
 import * as net from "node:net";
-import type { Daemon } from "./daemon.ts";
 import * as repoStore from "./repo_store.ts";
 import { onRefUpdate } from "./ci/scheduler.ts";
 
@@ -13,6 +12,8 @@ import {
   addPeerToConfig,
   addRepoToConfig,
   normalizePeerUrl,
+  type Config,
+  type PersistedInvite,
 } from "./config.ts";
 import { loadSecretsConfig, detectTools } from "./ci/config.ts";
 import {
@@ -25,6 +26,25 @@ import {
   type JoinResponse,
 } from "./invite.ts";
 import { decodePubkey, encodePubkey } from "./proto.ts";
+import type { Identity } from "./identity.ts";
+import type { PeerRegistry } from "./peer_registry.ts";
+import type { RepoRegistry } from "./repo_registry.ts";
+import type { CiDomain } from "./ci/ci_domain.ts";
+
+export interface ControlCtx {
+  config: Config;
+  root: string;
+  identity: Identity;
+  peers: PeerRegistry;
+  repos: RepoRegistry;
+  ci: CiDomain;
+  pendingInvites: Map<string, PersistedInvite>;
+  listenAddr: string | null;
+  signalShutdown(): void;
+  notifyCiRunChanged(repo: string): void;
+  recordPeerAddress(peer: string, address: string): Promise<boolean>;
+  savePendingInvites(): Promise<void>;
+}
 
 export interface ControlRequest {
   type: string;
@@ -36,7 +56,7 @@ export interface ControlResponse {
   [k: string]: unknown;
 }
 
-export async function run(state: Daemon): Promise<net.Server> {
+export async function run(state: ControlCtx): Promise<net.Server> {
   const sockPath = path.join(state.root, "sock");
   try {
     await fs.unlink(sockPath);
@@ -108,7 +128,7 @@ export async function run(state: Daemon): Promise<net.Server> {
   return server;
 }
 
-async function dispatch(state: Daemon, req: ControlRequest): Promise<ControlResponse> {
+async function dispatch(state: ControlCtx, req: ControlRequest): Promise<ControlResponse> {
   const now = Date.now();
   switch (req.type) {
     case "status": {
@@ -372,7 +392,7 @@ async function dispatch(state: Daemon, req: ControlRequest): Promise<ControlResp
   }
 }
 
-function peerSummaries(state: Daemon, now: number): unknown[] {
+function peerSummaries(state: ControlCtx, now: number): unknown[] {
   return state.config.peers
     .filter((p) => p.name !== state.config.self.name)
     .map((p) => {
@@ -390,7 +410,7 @@ function peerSummaries(state: Daemon, now: number): unknown[] {
     });
 }
 
-async function repoSummaries(state: Daemon, now: number): Promise<unknown[]> {
+async function repoSummaries(state: ControlCtx, now: number): Promise<unknown[]> {
   const contributed = new Set(state.config.repos.map((r) => r.name));
   const allNames = new Set<string>(contributed);
   for (const k of state.repos.keys()) allNames.add(k);
@@ -415,7 +435,7 @@ async function repoSummaries(state: Daemon, now: number): Promise<unknown[]> {
   });
 }
 
-function inferReachableAddress(state: Daemon): string {
+function inferReachableAddress(state: ControlCtx): string {
   const listen = state.listenAddr;
   if (!listen) return "";
   // listen is "host:port" — if host is wildcard (0.0.0.0 / ::) we can't put it
@@ -432,7 +452,7 @@ function splitHostPort(s: string): [string, string] {
   return [s.slice(0, idx), s.slice(idx + 1)];
 }
 
-function sweepExpiredInvites(state: Daemon): void {
+function sweepExpiredInvites(state: ControlCtx): void {
   const now = Date.now();
   for (const [k, v] of state.pendingInvites) {
     if (v.expiryMs < now) state.pendingInvites.delete(k);

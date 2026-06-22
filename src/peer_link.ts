@@ -1,7 +1,26 @@
 // Push-only peer link: POST signed Frames to peers, retry on failure with
 // exponential backoff. Mirror of src/peer_link.rs.
 
-import type { Daemon } from "./daemon.ts";
+import type { Config } from "./config.ts";
+import type { PeerRegistry } from "./peer_registry.ts";
+import type { RepoRegistry } from "./repo_registry.ts";
+import type { OutboundQueues } from "./outbound_queues.ts";
+import type { CiDomain } from "./ci/ci_domain.ts";
+import type { Identity } from "./identity.ts";
+
+export interface PeerLinkCtx {
+  config: Config;
+  root: string;
+  identity: Identity;
+  peers: PeerRegistry;
+  repos: RepoRegistry;
+  outbound: OutboundQueues;
+  ci: CiDomain;
+  notifyStatusChanged(): void;
+  notifyIssueChanged(repo: string): void;
+  notifyCiRunChanged(repo: string): void;
+  recordPeerAddress(peer: string, address: string): Promise<boolean>;
+}
 import { normalizePeerUrl } from "./config.ts";
 import {
   encodeFrame,
@@ -37,7 +56,7 @@ function isValidRepoName(name: string): boolean {
 // ---------- inbound frame handling ----------
 
 export async function handleInboundFrame(
-  state: Daemon,
+  state: PeerLinkCtx,
   sender: string,
   msg: Message,
 ): Promise<void> {
@@ -90,7 +109,7 @@ export async function handleInboundFrame(
 }
 
 async function handleInboundCiFrame(
-  state: Daemon,
+  state: PeerLinkCtx,
   sender: string,
   msg: import("./proto.ts").CiMessage,
 ): Promise<void> {
@@ -116,7 +135,7 @@ async function handleInboundCiFrame(
   }
 }
 
-function handleCiRunUpdate(state: Daemon, msg: import("./proto.ts").CiMessage): void {
+function handleCiRunUpdate(state: PeerLinkCtx, msg: import("./proto.ts").CiMessage): void {
   switch (msg.type) {
     case "CiStarted": {
       const run = state.ci.getRun(msg.run_id);
@@ -149,7 +168,7 @@ function handleCiRunUpdate(state: Daemon, msg: import("./proto.ts").CiMessage): 
 }
 
 async function handleInboundRefUpdate(
-  state: Daemon,
+  state: PeerLinkCtx,
   sender: string,
   repo: string,
   _refs: RefChange[],
@@ -195,7 +214,7 @@ async function handleInboundRefUpdate(
 }
 
 function scheduleReconcileIfStale(
-  state: Daemon,
+  state: PeerLinkCtx,
   peer: string,
   advertised: RepoStatus[],
 ): void {
@@ -263,7 +282,7 @@ async function postFrame(baseUrl: string, frame: Frame): Promise<boolean> {
   }
 }
 
-async function sendTo(state: Daemon, peer: string, frame: Frame): Promise<void> {
+async function sendTo(state: PeerLinkCtx, peer: string, frame: Frame): Promise<void> {
   const entry = state.peers.get(peer);
   if (!entry || entry.addresses.length === 0) {
     state.outbound.enqueue(peer, frame);
@@ -286,7 +305,7 @@ async function sendTo(state: Daemon, peer: string, frame: Frame): Promise<void> 
 
 // ---------- retry loop ----------
 
-export async function runRetryLoop(state: Daemon): Promise<void> {
+export async function runRetryLoop(state: PeerLinkCtx): Promise<void> {
   const backoffs = new Map<string, number>(); // peer → backoff secs
   const lastAttempt = new Map<string, number>(); // peer → epoch ms
 
@@ -352,7 +371,7 @@ export async function runRetryLoop(state: Daemon): Promise<void> {
 
 // ---------- heartbeat / hello ----------
 
-export async function runHeartbeat(state: Daemon, secs: number): Promise<void> {
+export async function runHeartbeat(state: PeerLinkCtx, secs: number): Promise<void> {
   const intervalMs = Math.max(1, secs) * 1000;
   while (true) {
     await sleep(intervalMs);
@@ -381,7 +400,7 @@ export async function runHeartbeat(state: Daemon, secs: number): Promise<void> {
   }
 }
 
-export async function runInitialHello(state: Daemon): Promise<void> {
+export async function runInitialHello(state: PeerLinkCtx): Promise<void> {
   const me = state.config.self.name;
   for (const p of state.config.peers) {
     if (p.name === me) continue;
@@ -403,7 +422,7 @@ export async function runInitialHello(state: Daemon): Promise<void> {
 // ---------- RefUpdate broadcast ----------
 
 export function broadcastRefUpdate(
-  state: Daemon,
+  state: PeerLinkCtx,
   repo: string,
   refs: Array<{ name: string; old_sha: string; new_sha: string }>,
   skip: string | null,
@@ -441,7 +460,7 @@ function sleep(ms: number): Promise<void> {
 
 // ---------- issue event broadcast ----------
 
-export function broadcastIssueEvent(state: Daemon, event: IssueEvent): void {
+export function broadcastIssueEvent(state: PeerLinkCtx, event: IssueEvent): void {
   void (async () => {
     const me = state.config.self.name;
     for (const p of state.config.peers) {
@@ -460,7 +479,7 @@ export function broadcastIssueEvent(state: Daemon, event: IssueEvent): void {
 // ---------- issue full sync (pull) ----------
 
 export async function pullIssuesFromPeer(
-  state: Daemon,
+  state: PeerLinkCtx,
   peer: string,
   repo: string,
 ): Promise<void> {
@@ -494,7 +513,7 @@ export async function pullIssuesFromPeer(
 }
 
 function scheduleIssueSyncIfStale(
-  state: Daemon,
+  state: PeerLinkCtx,
   peer: string,
   advertised: RepoStatus[],
 ): void {
@@ -521,7 +540,7 @@ function scheduleIssueSyncIfStale(
 // ---------- CI run full sync (pull) ----------
 
 export async function pullCiRunsFromPeer(
-  state: Daemon,
+  state: PeerLinkCtx,
   peer: string,
   repo: string,
 ): Promise<void> {
@@ -564,7 +583,7 @@ export async function pullCiRunsFromPeer(
 }
 
 function scheduleCiSyncIfStale(
-  state: Daemon,
+  state: PeerLinkCtx,
   peer: string,
   advertised: RepoStatus[],
 ): void {

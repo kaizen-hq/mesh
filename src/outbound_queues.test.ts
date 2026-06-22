@@ -6,9 +6,10 @@ import type { Frame } from "./proto.ts";
 
 function makeFrame(payload: number): Frame {
   return {
+    version: 1,
     sender: "alice",
     dest: "bob",
-    sig: new Uint8Array(64),
+    signature: new Uint8Array(64),
     payload: new Uint8Array([payload]),
   };
 }

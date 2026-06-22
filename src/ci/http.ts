@@ -1,8 +1,15 @@
 // CI HTTP routes: peer sync + log chunk pull.
 
-import type { Daemon } from "../daemon.ts";
+import type { CiDomain } from "./ci_domain.ts";
+import type { Config } from "../config.ts";
 import { loadRun, listRuns, readLog } from "./store.ts";
 import type { PipelineRun } from "./types.ts";
+
+export interface CiHttpCtx {
+  ci: CiDomain;
+  config: Config;
+  root: string;
+}
 
 function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -18,7 +25,7 @@ function text(status: number, body: string): Response {
 // ---------- GET /mesh/ci/:repo/runs ----------
 // Returns all PipelineRun records for a repo. Used by peers for full sync.
 
-export async function handleCiRunsList(state: Daemon, repo: string): Promise<Response> {
+export async function handleCiRunsList(state: CiHttpCtx, repo: string): Promise<Response> {
   const index = await listRuns(state.root, repo);
   const runs: PipelineRun[] = [];
   for (const entry of index) {
@@ -32,7 +39,7 @@ export async function handleCiRunsList(state: Daemon, repo: string): Promise<Res
 // Returns log chunks starting from seq N for gap repair.
 
 export async function handleLogChunks(
-  state: Daemon,
+  state: CiHttpCtx,
   runId: string,
   fromSeq: number,
 ): Promise<Response> {
@@ -57,7 +64,7 @@ export async function handleLogChunks(
 
 // ---------- route dispatcher ----------
 
-export async function route(state: Daemon, req: Request, urlPath: string): Promise<Response | null> {
+export async function route(state: CiHttpCtx, req: Request, urlPath: string): Promise<Response | null> {
   // GET /mesh/ci/:repo/runs
   const syncMatch = /^\/mesh\/ci\/([^/]+)\/runs$/.exec(urlPath);
   if (syncMatch && req.method === "GET") {

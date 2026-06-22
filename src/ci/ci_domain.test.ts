@@ -8,14 +8,13 @@ function makeRun(id: string, repo = "myrepo", status: PipelineRun["status"] = "r
   return {
     run_id: id,
     repo,
-    status,
-    pipeline_name: "ci",
-    trigger: { type: "push", pusher: "alice" },
+    ref: "refs/heads/main",
+    sha: "abc1234",
+    triggered_by: { type: "push", pusher: "alice" },
     runner: "alice",
-    created_at: new Date().toISOString(),
-    started_at: null,
-    finished_at: null,
-    jobs: [],
+    status,
+    started_at: new Date().toISOString(),
+    jobs: {},
   };
 }
 
@@ -62,8 +61,8 @@ describe("CiDomain runs", () => {
   it("setRun() overwrites an existing run with the same id", () => {
     const ci = new CiDomain();
     ci.setRun(makeRun("run-1", "repo-a", "running"));
-    ci.setRun(makeRun("run-1", "repo-a", "success"));
-    expect(ci.getRun("run-1")!.status).toBe("success");
+    ci.setRun(makeRun("run-1", "repo-a", "passed"));
+    expect(ci.getRun("run-1")!.status).toBe("passed");
   });
 
   it("allRuns() returns empty array initially", () => {
@@ -90,7 +89,7 @@ describe("CiDomain runs", () => {
   it("allRuns() can be filtered by status", () => {
     const ci = new CiDomain();
     ci.setRun(makeRun("run-1", "repo", "running"));
-    ci.setRun(makeRun("run-2", "repo", "success"));
+    ci.setRun(makeRun("run-2", "repo", "passed"));
     ci.setRun(makeRun("run-3", "repo", "running"));
     const running = ci.allRuns().filter((r) => r.status === "running");
     expect(running).toHaveLength(2);
@@ -99,8 +98,8 @@ describe("CiDomain runs", () => {
   it("mutations on a returned run are visible on next getRun()", () => {
     const ci = new CiDomain();
     ci.setRun(makeRun("run-1"));
-    ci.getRun("run-1")!.status = "success";
-    expect(ci.getRun("run-1")!.status).toBe("success");
+    ci.getRun("run-1")!.status = "passed";
+    expect(ci.getRun("run-1")!.status).toBe("passed");
   });
 });
 

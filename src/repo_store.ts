@@ -3,17 +3,24 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import * as fs from "node:fs/promises";
-import type { Divergence } from "./repo_registry.ts";
-import type { Daemon } from "./daemon.ts";
-import { findRepo, normalizePeerUrl } from "./config.ts";
+import type { Divergence, RepoRegistry } from "./repo_registry.ts";
+import { findRepo, normalizePeerUrl, type Config } from "./config.ts";
 import type { RepoStatus, BranchStatus } from "./proto.ts";
+import type { PeerRegistry } from "./peer_registry.ts";
 import * as git from "./git.ts";
+
+export interface RepoStoreCtx {
+  config: Config;
+  root: string;
+  repos: RepoRegistry;
+  peers: PeerRegistry;
+}
 
 export function mirrorPath(root: string, repo: string): string {
   return path.join(root, "repos", `${repo}.git`);
 }
 
-export async function ensureMirrors(state: Daemon): Promise<void> {
+export async function ensureMirrors(state: RepoStoreCtx): Promise<void> {
   for (const r of state.config.repos) {
     const dir = mirrorPath(state.root, r.name);
     await git.initBare(dir);
@@ -25,7 +32,7 @@ export async function ensureMirrors(state: Daemon): Promise<void> {
   }
 }
 
-export async function fetchAll(state: Daemon): Promise<void> {
+export async function fetchAll(state: RepoStoreCtx): Promise<void> {
   const home = os.homedir();
   const me = state.config.self.name;
 
@@ -82,7 +89,7 @@ export async function fetchAll(state: Daemon): Promise<void> {
   }
 }
 
-async function markFresh(state: Daemon, name: string, dir: string): Promise<void> {
+async function markFresh(state: RepoStoreCtx, name: string, dir: string): Promise<void> {
   const local = state.repos.ensure(name);
   local.lastFetch = Date.now();
   const head = await git.headSha(dir);
@@ -95,7 +102,7 @@ export interface ReconcileOutcome {
 }
 
 export async function reconcileFromPeer(
-  state: Daemon,
+  state: RepoStoreCtx,
   peer: string,
   repo: string,
 ): Promise<ReconcileOutcome> {
@@ -170,7 +177,7 @@ export async function reconcileFromPeer(
   return { advanced, divergent };
 }
 
-export async function repoStatuses(state: Daemon): Promise<RepoStatus[]> {
+export async function repoStatuses(state: RepoStoreCtx): Promise<RepoStatus[]> {
   const out: RepoStatus[] = [];
   for (const r of state.config.repos) {
     const dir = mirrorPath(state.root, r.name);
@@ -182,7 +189,7 @@ export async function repoStatuses(state: Daemon): Promise<RepoStatus[]> {
   return out;
 }
 
-export async function resetRepo(state: Daemon, name: string): Promise<void> {
+export async function resetRepo(state: RepoStoreCtx, name: string): Promise<void> {
   const dir = mirrorPath(state.root, name);
   if (await exists(dir)) {
     await fs.rm(dir, { recursive: true, force: true });
@@ -227,7 +234,7 @@ async function exists(p: string): Promise<boolean> {
   }
 }
 
-export async function runFetchLoop(state: Daemon, secs: number): Promise<void> {
+export async function runFetchLoop(state: RepoStoreCtx, secs: number): Promise<void> {
   const interval = Math.max(5, secs) * 1000;
   // initial pass immediately
   while (true) {

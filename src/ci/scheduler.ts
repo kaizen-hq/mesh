@@ -1,6 +1,18 @@
 // Push-triggered scheduling, capability matching, assignment protocol.
 
-import type { Daemon } from "../daemon.ts";
+import type { Config } from "../config.ts";
+import type { CiDomain } from "./ci_domain.ts";
+import type { PeerRegistry } from "../peer_registry.ts";
+import type { Identity } from "../identity.ts";
+
+export interface SchedulerCtx {
+  config: Config;
+  root: string;
+  identity: Identity;
+  ci: CiDomain;
+  peers: PeerRegistry;
+  notifyCiRunChanged(repo: string): void;
+}
 import type { Pipeline, PipelineRun, TriggerKind, NodeCapabilities, RunnerRequirements } from "./types.ts";
 import type { CiMessage } from "../proto.ts";
 import { signFrame } from "../proto.ts";
@@ -79,7 +91,7 @@ function pickBest(candidates: PeerCapabilityEntry[]): string {
 
 // ---------- build peer capability entries from Daemon ----------
 
-function peerCapabilities(state: Daemon): PeerCapabilityEntry[] {
+function peerCapabilities(state: SchedulerCtx): PeerCapabilityEntry[] {
   const entries: PeerCapabilityEntry[] = [];
   for (const [name, peer] of state.peers.entries()) {
     const caps = peer.capabilities;
@@ -103,7 +115,7 @@ function peerCapabilities(state: Daemon): PeerCapabilityEntry[] {
 const ASSIGNMENT_TIMEOUT_MS = 5000;
 
 export async function onRefUpdate(
-  state: Daemon,
+  state: SchedulerCtx,
   repo: string,
   ref: string,
   sha: string,
@@ -147,7 +159,7 @@ export async function onRefUpdate(
 }
 
 async function sendAssignment(
-  state: Daemon,
+  state: SchedulerCtx,
   peer: string,
   run: PipelineRun,
   pipeline: Pipeline,
@@ -187,13 +199,13 @@ async function sendAssignment(
   }
 }
 
-function scheduleLocalRun(state: Daemon, pipeline: Pipeline, run: PipelineRun): void {
+function scheduleLocalRun(state: SchedulerCtx, pipeline: Pipeline, run: PipelineRun): void {
   state.ci.setRun(run);
   state.notifyCiRunChanged(run.repo);
   void runLocalPipeline(state, pipeline, run);
 }
 
-async function runLocalPipeline(state: Daemon, pipeline: Pipeline, run: PipelineRun): Promise<void> {
+async function runLocalPipeline(state: SchedulerCtx, pipeline: Pipeline, run: PipelineRun): Promise<void> {
   const { runPipeline } = await import("./engine.ts");
   const repoCfg = state.config.repos.find((r) => r.name === run.repo);
   if (!repoCfg) return;
@@ -246,7 +258,7 @@ async function runLocalPipeline(state: Daemon, pipeline: Pipeline, run: Pipeline
 
 // ---------- CI frame broadcast helpers ----------
 
-async function broadcastCiFrame(state: Daemon, msg: CiMessage): Promise<void> {
+async function broadcastCiFrame(state: SchedulerCtx, msg: CiMessage): Promise<void> {
   const me = state.config.self.name;
   for (const p of state.config.peers) {
     if (p.name === me) continue;
@@ -277,7 +289,7 @@ async function broadcastCiFrame(state: Daemon, msg: CiMessage): Promise<void> {
 // ---------- inbound CiAssignment handler ----------
 
 export async function handleAssignment(
-  state: Daemon,
+  state: SchedulerCtx,
   msg: Extract<CiMessage, { type: "CiAssignment" }>,
   sender?: string,
 ): Promise<void> {
