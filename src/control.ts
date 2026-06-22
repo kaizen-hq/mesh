@@ -210,15 +210,12 @@ async function dispatch(state: ControlCtx, req: ControlRequest): Promise<Control
     case "add_repo": {
       const name = String(req.name ?? "").trim();
       const repoPath = String(req.path ?? "").trim();
-      const branches = Array.isArray(req.branches)
-        ? (req.branches as unknown[]).map((b) => String(b))
-        : [];
       if (!name || !repoPath) {
         return { type: "error", message: "add_repo requires name and path" };
       }
       const cfgPath = path.join(state.root, "mesh.toml");
       try {
-        const changed = await addRepoToConfig(cfgPath, { name, path: repoPath, branches });
+        const changed = await addRepoToConfig(cfgPath, { name, path: repoPath });
         const next = await loadConfig(cfgPath);
         state.config = next;
         state.peers.refresh(state.config);
@@ -416,14 +413,13 @@ async function repoSummaries(state: ControlCtx, now: number): Promise<unknown[]>
   for (const k of state.repos.keys()) allNames.add(k);
   return [...allNames].sort().map((name) => {
     const local = state.repos.get(name);
-    const cfg_entry = state.config.repos.find((r) => r.name === name);
     return {
       name,
       contributed: contributed.has(name),
       sources: local?.sourceList() ?? [],
       local_head: local?.lastHead ?? null,
       last_fetch_secs: local?.lastFetch ? Math.floor((now - local.lastFetch) / 1000) : null,
-      branches: cfg_entry?.branches ?? [],
+
       divergences:
         local?.divergenceList().map((d) => ({
           peer: d.peer,

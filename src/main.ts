@@ -206,19 +206,13 @@ async function main() {
         const name = args.positional[0];
         const repoPath = args.positional[1];
         if (!name || !repoPath) {
-          console.error("usage: mesh add-repo <name> <path> [--branch B ...]");
+          console.error("usage: mesh add-repo <name> <path>");
           process.exit(1);
         }
-        const branchesFlag = args.flags["branch"];
-        const branches =
-          typeof branchesFlag === "string"
-            ? branchesFlag.split(",").map((s) => s.trim()).filter(Boolean)
-            : [];
         return await sendAndPrint(root, {
           type: "add_repo",
           name,
           path: repoPath,
-          branches,
         });
       }
       case "add-repos": {

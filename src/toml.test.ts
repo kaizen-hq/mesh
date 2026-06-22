@@ -63,8 +63,8 @@ describe("stringify", () => {
         { name: "bob",   pubkey: "bbb", addresses: ["10.0.0.2:7979", "10.0.0.3:7979"] },
       ],
       repos: [
-        { name: "mesh", path: "src/mesh", branches: ["main"] },
-        { name: "core", path: "src/core", branches: ["main", "dev"] },
+        { name: "mesh", path: "src/mesh" },
+        { name: "core", path: "src/core" },
       ],
       transport: { tls: false, poll_secs: 1 },
     };
@@ -75,7 +75,7 @@ describe("stringify", () => {
     expect(back.peers).toHaveLength(2);
     expect(back.peers[1].addresses).toEqual(["10.0.0.2:7979", "10.0.0.3:7979"]);
     expect(back.repos).toHaveLength(2);
-    expect(back.repos[1].branches).toEqual(["main", "dev"]);
+
     expect(back.transport.tls).toBe(false);
     expect(back.transport.poll_secs).toBe(1);
   });

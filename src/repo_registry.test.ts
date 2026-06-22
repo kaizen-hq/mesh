@@ -24,7 +24,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
 describe("RepoRegistry.create()", () => {
   it("initializes repos from config", () => {
     const config = makeConfig({
-      repos: [{ name: "myrepo", path: "/tmp/r", branches: ["main"] }],
+      repos: [{ name: "myrepo", path: "/tmp/r" }],
     });
     const registry = RepoRegistry.create(config);
     expect(registry.has("myrepo")).toBe(true);
@@ -34,8 +34,8 @@ describe("RepoRegistry.create()", () => {
   it("initializes multiple repos", () => {
     const config = makeConfig({
       repos: [
-        { name: "repo-a", path: "/tmp/a", branches: ["main"] },
-        { name: "repo-b", path: "/tmp/b", branches: ["main"] },
+        { name: "repo-a", path: "/tmp/a" },
+        { name: "repo-b", path: "/tmp/b" },
       ],
     });
     const registry = RepoRegistry.create(config);
@@ -65,8 +65,8 @@ describe("RepoRegistry read methods", () => {
   it("keys() yields all repo names", () => {
     const config = makeConfig({
       repos: [
-        { name: "repo-a", path: "/tmp/a", branches: [] },
-        { name: "repo-b", path: "/tmp/b", branches: [] },
+        { name: "repo-a", path: "/tmp/a" },
+        { name: "repo-b", path: "/tmp/b" },
       ],
     });
     const registry = RepoRegistry.create(config);
@@ -76,8 +76,8 @@ describe("RepoRegistry read methods", () => {
   it("entries() yields all [name, RepoLocal] pairs", () => {
     const config = makeConfig({
       repos: [
-        { name: "repo-a", path: "/tmp/a", branches: [] },
-        { name: "repo-b", path: "/tmp/b", branches: [] },
+        { name: "repo-a", path: "/tmp/a" },
+        { name: "repo-b", path: "/tmp/b" },
       ],
     });
     const registry = RepoRegistry.create(config);

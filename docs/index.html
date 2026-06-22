@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mesh — git was already peer-to-peer</title>
+<meta name="description" content="The coordination layer git always needed. Share code with your team without a server, an account, or anyone's permission.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav>
+  <span class="nav-logo">mesh</span>
+  <a class="nav-link" href="https://github.com/kaizen-hq/mesh">GitHub →</a>
+</nav>
+
+<!-- HERO -->
+<section class="hero">
+  <h1>Git is already<br>peer-to-peer.</h1>
+  <p class="hero-sub">We just stopped using it that way.</p>
+  <p class="hero-body">
+    Mesh is the coordination layer git always needed. Share code with your team —
+    no server, no account, no one's permission required.
+  </p>
+  <div class="hero-actions">
+    <button class="btn-install" onclick="copyInstall(this)">
+      <span class="install-prefix">$</span>
+      <span class="install-cmd">curl -fsSL https://raw.githubusercontent.com/kaizen-hq/mesh/main/install.sh | bash</span>
+      <span class="install-copy">copy</span>
+    </button>
+    <a class="btn-secondary" href="https://github.com/kaizen-hq/mesh">view on GitHub</a>
+  </div>
+</section>
+
+<!-- DEMO -->
+<section class="demo-section">
+  <div class="demo-grid">
+    <div class="terminal-wrap">
+      <div class="terminal-bar">
+        <span class="dot red"></span>
+        <span class="dot yellow"></span>
+        <span class="dot green"></span>
+        <span class="terminal-title">alice's machine</span>
+      </div>
+      <div class="terminal-body" id="term-alice"></div>
+    </div>
+    <div class="terminal-wrap">
+      <div class="terminal-bar">
+        <span class="dot red"></span>
+        <span class="dot yellow"></span>
+        <span class="dot green"></span>
+        <span class="terminal-title">bob's machine</span>
+      </div>
+      <div class="terminal-body" id="term-bob"></div>
+    </div>
+  </div>
+</section>
+
+<!-- THE GAP -->
+<section class="prose-section">
+  <h2>There's a gap.</h2>
+  <p>
+    On one side: <code>git daemon</code>. It works. Nobody uses it.
+    It's raw, manual, and assumes you already know what you're doing.
+  </p>
+  <p>
+    On the other side: GitHub, GitLab, Bitbucket. Powerful. But you need
+    an account. Admin rights. Sometimes a ticket filed with IT, and then you wait.
+  </p>
+  <p>
+    Git was designed to let any machine talk to any other machine.
+    Push, pull, clone — peer to peer, by design. Linus built it that way.
+  </p>
+  <p class="callout">
+    Then we spent 15 years routing everything through a central server.
+  </p>
+  <p>
+    That's the gap. Mesh lives in it. It's what <code>git daemon</code>
+    should have grown into: automatic peer discovery, signed gossip, and
+    git's own HTTP transport wired together.
+  </p>
+</section>
+
+<!-- RADICLE -->
+<section class="prose-section alt">
+  <h2>We looked at Radicle.</h2>
+  <p>
+    Great project. But it looks like it's built for publishing to a public network —
+    for code that belongs to the world, discoverable by strangers.
+  </p>
+  <p>
+    We wanted something different: a private network for three people who
+    already know each other, already trust each other, and just need to
+    share a repo while they wait for someone in IT to approve a GitLab sub-group.
+  </p>
+  <p class="callout">
+    We could've spent weeks learning Radicle's trust model.
+    But we're software builders. So we built mesh instead.
+  </p>
+</section>
+
+<!-- INSIGHT -->
+<section class="prose-section">
+  <h2>The trust is already there.</h2>
+  <p>
+    Your team already knows each other. You don't need a third party
+    to sit in the middle and mediate that.
+  </p>
+  <p>
+    Mesh starts from that assumption. You exchange pubkeys once —
+    one <code>mesh invite</code>, one <code>mesh join</code>.
+    After that, every machine in your mesh authenticates every message
+    cryptographically. No CA. No certificate from a stranger.
+    Just your keys.
+  </p>
+  <p>
+    Every node keeps a full bare mirror of every repo.
+    If your laptop is off, your teammate's node still has it.
+    There's no server to go down because every node <em>is</em> the server.
+  </p>
+</section>
+
+<!-- FEATURES -->
+<section class="features-section">
+  <h2>What you get</h2>
+  <div class="features-grid">
+    <div class="feature">
+      <div class="feature-icon">⟳</div>
+      <h3>Git sync</h3>
+      <p>Repos replicate automatically across all peers over signed HTTPS. Any git client works — <code>git push mesh main</code> and every node updates.</p>
+    </div>
+    <div class="feature">
+      <div class="feature-icon">▶</div>
+      <h3>Distributed CI/CD</h3>
+      <p>Pipelines defined in <code>.mesh/mesh-ci.yml</code>. Any node can be a runner. Docker or shell jobs. Assignment, execution, and log streaming over the same gossip channel.</p>
+    </div>
+    <div class="feature">
+      <div class="feature-icon">◈</div>
+      <h3>Issues board</h3>
+      <p>A lightweight issues board per repo, synced across peers. No database. No SaaS. Drag to reorder, label to filter, markdown in the body.</p>
+    </div>
+    <div class="feature">
+      <div class="feature-icon">↑</div>
+      <h3>Self-updating</h3>
+      <p><code>mesh update</code> pulls the latest release from GitHub and applies it in place. Or <code>mesh update --from alice</code> to get it from a peer on your LAN.</p>
+    </div>
+  </div>
+</section>
+
+<!-- GET STARTED -->
+<section class="start-section">
+  <h2>Get started in two minutes</h2>
+
+  <div class="steps">
+    <div class="step">
+      <div class="step-num">1</div>
+      <div class="step-body">
+        <h3>Install</h3>
+        <pre><code>curl -fsSL https://raw.githubusercontent.com/kaizen-hq/mesh/main/install.sh | bash</code></pre>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num">2</div>
+      <div class="step-body">
+        <h3>Init &amp; start</h3>
+        <pre><code>mesh init
+mesh start</code></pre>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num">3</div>
+      <div class="step-body">
+        <h3>Add your repo</h3>
+        <pre><code>mesh add-repo my-app ~/src/my-app</code></pre>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num">4</div>
+      <div class="step-body">
+        <h3>Invite a teammate</h3>
+        <pre><code>mesh invite   # prints a token
+# teammate runs:
+mesh join &lt;token&gt;</code></pre>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num">5</div>
+      <div class="step-body">
+        <h3>Push</h3>
+        <pre><code>git config http.https://localhost:7979.sslVerify false
+git remote add mesh https://localhost:7979/my-app.git
+git push mesh main</code></pre>
+      </div>
+    </div>
+  </div>
+
+  <p class="start-cta">
+    <a class="btn-primary" href="https://github.com/kaizen-hq/mesh#readme">Full documentation →</a>
+  </p>
+</section>
+
+<footer>
+  <span>mesh is <a href="https://github.com/kaizen-hq/mesh/blob/main/LICENSE">MIT licensed</a></span>
+  <span>built on <a href="https://bun.sh">Bun</a></span>
+  <a href="https://github.com/kaizen-hq/mesh">GitHub</a>
+</footer>
+
+<script src="demo.js"></script>
+<script>
+function copyInstall(btn) {
+  const cmd = btn.querySelector('.install-cmd').textContent;
+  navigator.clipboard.writeText(cmd).then(() => {
+    const copy = btn.querySelector('.install-copy');
+    copy.textContent = 'copied!';
+    setTimeout(() => copy.textContent = 'copy', 1800);
+  });
+}
+</script>
+</body>
+</html>

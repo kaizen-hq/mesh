@@ -22,7 +22,6 @@ export interface PeerEntry {
 export interface RepoEntry {
   name: string;
   path: string;
-  branches: string[];
 }
 
 export interface TransportSection {
@@ -65,7 +64,7 @@ const KNOWN_RUNNER = new Set([
   "max_worktree_disk_mb", "log_retention_runs",
 ]);
 const KNOWN_PEER = new Set(["name", "pubkey", "addresses", "address"]);
-const KNOWN_REPO = new Set(["name", "path", "branches"]);
+const KNOWN_REPO = new Set(["name", "path"]);
 
 function warnUnknown(file: string, section: string, obj: Record<string, unknown>, known: Set<string>): void {
   for (const key of Object.keys(obj)) {
@@ -113,7 +112,6 @@ export async function loadConfig(file: string): Promise<Config> {
     return {
       name: String(o.name),
       path: String(o.path),
-      branches: Array.isArray(o.branches) ? o.branches.map(String) : [],
     } satisfies RepoEntry;
   });
 
@@ -253,22 +251,11 @@ export async function addRepoToConfig(
       existing.path = repo.path;
       changed = true;
     }
-    const curBranches = Array.isArray(existing.branches)
-      ? existing.branches.map(String)
-      : [];
-    if (
-      curBranches.length !== repo.branches.length ||
-      curBranches.some((b, i) => b !== repo.branches[i])
-    ) {
-      existing.branches = [...repo.branches];
-      changed = true;
-    }
     if (!changed) return false;
   } else {
     doc.repos.push({
       name: repo.name,
       path: repo.path,
-      branches: [...repo.branches],
     });
   }
   await writeDocAtomic(file, doc);

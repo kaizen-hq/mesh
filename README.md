@@ -81,7 +81,7 @@ mesh repos                                    # list repos + sync freshness
 mesh reload                                   # re-read mesh.toml and secrets.yml without restarting
 mesh sync                                     # force a reconciliation round
 mesh add-peer <name> <pubkey> [addr]          # manually add a peer
-mesh add-repo <name> <path> [--branch B ...]  # contribute a working copy
+mesh add-repo <name> <path>                   # contribute a working copy
 mesh add-repos <parent-dir>                   # scan a directory and add all git repos
 mesh add-address <peer> <addr>                # bootstrap a known address for a peer
 mesh invite --addr HOST:PORT [--ttl SECS]     # generate a one-time pairing token (default TTL: 600s)
@@ -270,7 +270,7 @@ Every node that will **execute** jobs for a repo must have the repo registered
 in its `mesh.toml`:
 
 ```sh
-mesh add-repo my-app ~/src/my-app --branch main
+mesh add-repo my-app ~/src/my-app
 mesh reload
 ```
 
@@ -390,7 +390,7 @@ mesh reload
 
 ### Pipeline triggered but jobs never start / run stays `pending`
 
-- **Repo not registered on the runner.** The runner needs the repo cloned locally and registered in its `mesh.toml`. Without it, mesh logs `no reachable source for <repo>` and the run stays `pending`. Fix: clone the repo on the runner node and run `mesh add-repo <name> <path> --branch main && mesh reload`.
+- **Repo not registered on the runner.** The runner needs the repo cloned locally and registered in its `mesh.toml`. Without it, mesh logs `no reachable source for <repo>` and the run stays `pending`. Fix: clone the repo on the runner node and run `mesh add-repo <name> <path> && mesh reload`.
 - `mesh ci status <repo>` — if the run shows `pending` indefinitely, the runner received the assignment but hasn't started. Check the runner node's daemon logs.
 - `mesh ci runners` — verify the assigned runner shows `runner: true` and `jobs_running` below `max_concurrent_jobs`.
 - If `execution_modes` on the runner doesn't include the mode the job requires (`docker` or `shell`), the job will fail immediately with a log line like `job "X" requires shell mode but "shell" is not in execution_modes`.

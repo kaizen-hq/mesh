@@ -77,7 +77,7 @@ describe("Daemon.create()", () => {
 
   it("initializes repos from config", async () => {
     const config = makeConfig({
-      repos: [{ name: "myrepo", path: "/tmp/r", branches: ["main"] }],
+      repos: [{ name: "myrepo", path: "/tmp/r" }],
     });
     const daemon = await Daemon.create(await makeTmpRoot(), config, makeIdentity());
     expect(daemon.repos.has("myrepo")).toBe(true);
