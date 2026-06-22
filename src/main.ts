@@ -14,10 +14,8 @@ import * as httpServer from "./http_server.ts";
 import * as peerLink from "./peer_link.ts";
 import * as repoStore from "./repo_store.ts";
 import * as serveInstall from "./serve_install.ts";
-import * as serveInstallCode from "./serve_install_code.ts";
 import { buildZip, meshRoot, isCompiledBinary } from "./package_source.ts";
 import { runUpdate } from "./update.ts";
-import { runUpdateCode } from "./update_code.ts";
 import { runAddRepos } from "./add_repos.ts";
 import { loadSecretsConfig, detectTools } from "./ci/config.ts";
 import { checkCronSlots, type CronJobSpec } from "./ci/cron.ts";
@@ -26,7 +24,7 @@ import pkg from "../package.json" with { type: "json" };
 // Source-paradigm commands need the mesh source tree on the real filesystem,
 // so they're hidden (and refuse to run) inside a `bun build --compile` binary.
 const SOURCE_ONLY_USAGE = `  package [out-path]                Build mesh-src.zip for delivery
-  serve-install-code [--listen ADDR] Serve source zip + bun-based installer
+  serve-install [--listen ADDR]     Serve source zip + bun-based installer
 `;
 
 const USAGE_HEAD = `Usage: mesh <command> [args]
@@ -36,7 +34,7 @@ Commands:
   init                              Generate identity + seed mesh.toml
   pubkey                            Print our ed25519 pubkey
   url <repo>                        Print canonical local URL for a repo
-  serve-install [--listen ADDR]     Serve compiled binary to teammates over HTTP
+  serve-install [--listen ADDR]     Serve source zip to teammates over HTTP
 `;
 
 const USAGE_TAIL = `  start [flags]                     Run the foreground server
@@ -53,8 +51,7 @@ const USAGE_TAIL = `  start [flags]                     Run the foreground serve
   add-repos <parent-dir>            scan dir for git working copies, append to mesh.toml
   invite [--addr HOST:PORT] [--ttl SECS]   print a pairing token for a teammate
   join <token>                      accept a teammate's pairing token
-  update [--from PEER] [--force]    fetch + swap a newer mesh binary
-  update-code [--from PEER] [--force]  refresh a source-paradigm install
+  update [--from PEER] [--ref TAG] [--force]  update to the latest release
   ci status [<repo>]                show recent pipeline runs
   ci run <repo> <ref>               manually trigger a pipeline
   ci logs <repo> <run_id>           print build log
@@ -140,12 +137,7 @@ async function main() {
       case "url":
         return cmdUrl(args.positional[0]);
       case "serve-install":
-        return await serveInstall.run((args.flags["listen"] as string) || "0.0.0.0:8000", root);
-      case "serve-install-code":
-        return await serveInstallCode.run(
-          (args.flags["listen"] as string) || "0.0.0.0:8001",
-          root,
-        );
+        return await serveInstall.run((args.flags["listen"] as string) || "0.0.0.0:8001", root);
       case "package": {
         if (isCompiledBinary()) {
           throw new Error(
@@ -256,12 +248,7 @@ async function main() {
         return await runUpdate({
           root,
           from: (args.flags["from"] as string) || undefined,
-          force: !!args.flags["force"],
-        });
-      case "update-code":
-        return await runUpdateCode({
-          root,
-          from: (args.flags["from"] as string) || undefined,
+          ref: (args.flags["ref"] as string) || undefined,
           force: !!args.flags["force"],
         });
       case "ci":
