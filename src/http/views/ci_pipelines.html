@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>pipelines — {{repo}} — {{me}}</title>
+<link rel="stylesheet" href="/static/mesh.css">
+</head>
+<body>
+<h1><a href="/status">{{me}}</a> / <strong>{{repo}}</strong></h1>
+<nav>
+  <a href="/repos/{{repo_enc}}/issues">issues</a>
+  <a href="/repos/{{repo_enc}}/ci" class="active">pipelines</a>
+</nav>
+
+{{content}}
+
+<footer><a href="/status">mesh status</a></footer>
+
+<script>
+const es = new EventSource(location.pathname + '/events');
+es.addEventListener('run-changed', async () => {
+  try {
+    const html = await fetch(location.pathname).then(r => r.text());
+    const tmp = document.createElement('div');
+    tmp.innerHTML = html;
+    const next = tmp.querySelector('#runs-table');
+    if (next) document.getElementById('runs-table').replaceWith(next);
+  } catch {}
+});
+</script>
+</body>
+</html>

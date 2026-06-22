@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>issues — {{repo}} — {{me}}</title>
+<link rel="stylesheet" href="/static/mesh.css">
+</head>
+<body>
+<h1><a href="/status">{{me}}</a> / <a href="/repos/{{repo_enc}}/issues"><strong>{{repo}}</strong></a></h1>
+
+<nav>
+  <a href="/repos/{{repo_enc}}/issues" class="active">issues</a>
+  <a href="/repos/{{repo_enc}}/ci">pipelines</a>
+</nav>
+
+<div class="board-filters">
+{{filter_chips}}
+<button class="chip" id="show-closed-btn" onclick="toggleClosed()" type="button">show closed</button>
+</div>
+
+{{board}}
+
+<footer><a href="/status">mesh status</a> &middot; built on Bun</footer>
+
+<script>
+const active = new Set();
+let showClosed = localStorage.getItem('showClosed') === 'true';
+let opened = null;
+
+function applyFilters() {
+  document.querySelectorAll('.card[data-id]').forEach(c => {
+    const labels = c.dataset.labels ? c.dataset.labels.split(',').filter(Boolean) : [];
+    const trashed = c.dataset.status === 'trashed';
+    const statusOk = !trashed && (showClosed || c.dataset.status !== 'closed');
+    const labelOk = active.size === 0 || labels.some(l => active.has(l));
+    c.style.display = (statusOk && labelOk) ? '' : 'none';
+  });
+}
+
+function toggleLabel(l) {
+  active.has(l) ? active.delete(l) : active.add(l);
+  document.querySelectorAll('[data-label-chip]').forEach(c => {
+    c.classList.toggle('active', active.has(c.dataset.labelChip));
+  });
+  applyFilters();
+}
+
+function toggleClosed() {
+  showClosed = !showClosed;
+  localStorage.setItem('showClosed', showClosed);
+  document.getElementById('show-closed-btn').classList.toggle('active', showClosed);
+  applyFilters();
+}
+
+async function trashCard(id, repo) {
+  const form = new FormData();
+  form.set('status', 'trashed');
+  try {
+    await fetch('/repos/' + encodeURIComponent(repo) + '/issues/' + encodeURIComponent(id) + '/status', {
+      method: 'POST', body: form
+    });
+    const card = document.getElementById(id);
+    if (card) card.style.display = 'none';
+  } catch {}
+}
+
+function toggleCard(id) {
+  const prev = opened;
+  if (prev) {
+    const prevDetail = document.querySelector('[data-id="' + prev + '"] .card-detail');
+    if (prevDetail) prevDetail.hidden = true;
+    opened = null;
+  }
+  if (prev !== id) {
+    const detail = document.querySelector('[data-id="' + id + '"] .card-detail');
+    if (detail) { detail.hidden = false; opened = id; }
+  }
+}
+
+document.getElementById('show-closed-btn').classList.toggle('active', showClosed);
+applyFilters();
+
+if (location.hash) toggleCard(location.hash.slice(1));
+
+const es = new EventSource(location.pathname + '/events');
+es.addEventListener('board-changed', async () => {
+  try {
+    const html = await fetch(location.pathname + '/board').then(r => r.text());
+    const tmp = document.createElement('div');
+    tmp.innerHTML = html;
+    const next = tmp.firstElementChild;
+    if (next) document.getElementById('board').replaceWith(next);
+    if (opened) {
+      const d = document.querySelector('[data-id="' + opened + '"] .card-detail');
+      if (d) d.hidden = false;
+    }
+    applyFilters();
+  } catch {}
+});
+
+let dragSrc = null;
+
+document.addEventListener('dragstart', e => {
+  const card = e.target.closest('.card[data-id]');
+  if (!card) return;
+  dragSrc = card;
+  card.classList.add('dragging');
+  e.dataTransfer.effectAllowed = 'move';
+});
+
+document.addEventListener('dragend', e => {
+  const card = e.target.closest('.card[data-id]');
+  if (card) card.classList.remove('dragging');
+  document.querySelectorAll('.drag-over').forEach(c => c.classList.remove('drag-over'));
+  dragSrc = null;
+});
+
+document.addEventListener('dragover', e => {
+  const card = e.target.closest('.card[data-id]');
+  if (!card || card === dragSrc) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+  document.querySelectorAll('.drag-over').forEach(c => c.classList.remove('drag-over'));
+  card.classList.add('drag-over');
+});
+
+document.addEventListener('dragleave', e => {
+  const card = e.target.closest('.card[data-id]');
+  if (card) card.classList.remove('drag-over');
+});
+
+document.addEventListener('drop', async e => {
+  const target = e.target.closest('.card[data-id]');
+  if (!target || !dragSrc || target === dragSrc) return;
+  e.preventDefault();
+  target.classList.remove('drag-over');
+
+  const board = document.getElementById('board');
+  const allCards = [...board.querySelectorAll('.card[data-id]')];
+  const srcIdx = allCards.indexOf(dragSrc);
+  const tgtIdx = allCards.indexOf(target);
+  const insertAfter = srcIdx < tgtIdx;
+  const cards = allCards.filter(c => c !== dragSrc);
+  const ti = cards.indexOf(target);
+
+  let prevOrder, nextOrder, newOrder;
+  if (insertAfter) {
+    prevOrder = parseFloat(target.dataset.order || '0');
+    const nextCard = cards[ti + 1];
+    nextOrder = nextCard ? parseFloat(nextCard.dataset.order || String(Date.now() + 1e9)) : prevOrder + 1e9;
+    newOrder = (prevOrder + nextOrder) / 2;
+    const anchor = nextCard || board.querySelector('.card-new') || null;
+    board.insertBefore(dragSrc, anchor);
+  } else {
+    nextOrder = parseFloat(target.dataset.order || String(Date.now() + 1e9));
+    const prevCard = cards[ti - 1];
+    prevOrder = prevCard ? parseFloat(prevCard.dataset.order || '0') : nextOrder - 1e9;
+    newOrder = (prevOrder + nextOrder) / 2;
+    board.insertBefore(dragSrc, target);
+  }
+
+  dragSrc.dataset.order = String(newOrder);
+
+  const id = dragSrc.dataset.id;
+  const form = new FormData();
+  form.set('order', String(newOrder));
+  try {
+    await fetch(location.pathname + '/' + encodeURIComponent(id) + '/order', {
+      method: 'POST', body: form
+    });
+  } catch {}
+});
+</script>
+</body>
+</html>
