@@ -34,13 +34,31 @@ After install, `mesh` is available at `~/.local/bin/mesh`. Make sure that direct
 export PATH="$HOME/.local/bin:$PATH"   # add to ~/.zshrc or ~/.bashrc
 ```
 
+To update to the latest release at any time:
+
+```sh
+mesh update
+```
+
+To pin a specific release:
+
+```sh
+mesh update --ref v1.2.3
+```
+
+To update from a peer on your local network instead of GitHub:
+
+```sh
+mesh update --from alice
+```
+
 ### From a teammate on the local network
 
 If a teammate already has mesh running, they can serve the installer directly:
 
 ```sh
 # On the teammate's machine:
-mesh serve-install-code     # prints a curl line for you to run
+mesh serve-install     # prints a curl line for you to run
 ```
 
 This serves the same install flow over plain HTTP — no GitHub needed. Useful when you're on the same network and want the exact version your teammate is running.
@@ -486,20 +504,20 @@ add invite expiry warning to status output            → build (patch bump)
 
 ```sh
 # Serve the installer over the local network:
-mesh serve-install-code                 # plain HTTP, prints the curl line
+mesh serve-install                 # plain HTTP, prints the curl line
 
 # Or just build the zip manually:
 bun run package                         # writes mesh-src.zip to repo root
 ```
 
-The `serve-install-code` handler serves:
+The `serve-install` handler serves:
 
 - `GET /install.sh` — installs bun/unzip/git, downloads the zip, unpacks to
   `~/.local/share/mesh/`, runs `bun install`, and writes a shim at
   `~/.local/bin/mesh`.
 - `GET /mesh-src.zip` — the source zip, rebuilt every 60 seconds so edits are
   picked up without restarting.
-- `GET /mesh-src.zip.sig` — ed25519 signature of the zip (for `mesh update-code`).
+- `GET /mesh-src.zip.sig` — ed25519 signature of the zip (verified by `mesh update --from <peer>`).
 - `GET /version` — JSON with version, sha256, and signature.
 
 ## License

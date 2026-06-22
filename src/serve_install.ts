@@ -1,8 +1,6 @@
-// `mesh serve-install-code` — plain-HTTP one-shot serving the mesh source
+// `mesh serve-install` — plain-HTTP one-shot serving the mesh source
 // tree as a zip, plus an install script that unzips + bun-installs +
-// installs a shim at ~/.local/bin/mesh. The companion to serve_install.ts
-// which serves a precompiled binary; this serves source for teammates who
-// prefer to run from `bun` directly.
+// installs a shim at ~/.local/bin/mesh.
 
 import * as dgram from "node:dgram";
 import * as ed from "./ed25519.ts";
@@ -61,14 +59,12 @@ export async function run(listen: string, root: string): Promise<void> {
   if (isCompiledBinary()) {
     throw new Error(
       [
-        "serve-install-code is a source-paradigm command and cannot run from a",
+        "serve-install is a source-paradigm command and cannot run from a",
         "compiled binary: the source tree lives inside the binary's virtual FS",
         "and is invisible to the `zip` tool.",
         "",
         "To share source with teammates: run mesh from a checkout via",
-        "  bun src/main.ts serve-install-code",
-        "",
-        "To share the compiled binary instead: mesh serve-install",
+        "  bun src/main.ts serve-install",
       ].join("\n"),
     );
   }

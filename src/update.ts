@@ -3,7 +3,7 @@
 // Two modes:
 //   github (default): download mesh-src.zip from the latest GitHub release,
 //                     or a pinned tag with --ref vX.Y.Z.
-//   peer (--from PEER): fetch from a teammate running `mesh serve-install-code`,
+//   peer (--from PEER): fetch from a teammate running `mesh serve-install`,
 //                     verify ed25519 signature against their pubkey in mesh.toml.
 //
 // The install directory is detected from argv[1] (the shim points at
@@ -138,7 +138,7 @@ async function updateFromPeer(
   if (!address) throw new Error(`no address known for peer ${peerName}`);
 
   const { baseUrl } = normalizePeerUrl(address, cfg.transport.tls);
-  // serve-install-code listens on 8001 by default; swap when we see port 7979.
+  // serve-install listens on 8001 by default; swap when we see port 7979.
   const installerBase = baseUrl.replace(/:(\d+)$/, (_m, p) => (p === "7979" ? ":8001" : `:${p}`));
 
   console.log(`checking ${installerBase}/version ...`);
