@@ -6,7 +6,7 @@
 import * as path from "node:path";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
-import type { DaemonState } from "./state.ts";
+import type { Daemon } from "./daemon.ts";
 import * as repoStore from "./repo_store.ts";
 import * as gitp from "./git.ts";
 import * as peerLink from "./peer_link.ts";
@@ -97,10 +97,11 @@ function notifyCiRunChanged(repo: string): void {
 }
 
 export interface ServerHandle {
+  port: number;
   stop(): Promise<void>;
 }
 
-export async function run(state: DaemonState, listen: string): Promise<ServerHandle> {
+export async function run(state: Daemon, listen: string): Promise<ServerHandle> {
   const [host, portStr] = parseListen(listen);
   const port = Number(portStr);
   if (Number.isNaN(port)) throw new Error(`invalid listen address: ${listen}`);
@@ -148,6 +149,7 @@ export async function run(state: DaemonState, listen: string): Promise<ServerHan
   state.ciRunChangedCallbacks.push((repo) => notifyCiRunChanged(repo));
 
   return {
+    port: (server as any).port as number,
     async stop() {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (server as any).stop?.(true);
@@ -165,7 +167,7 @@ function parseListen(listen: string): [string, string] {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function routeRequest(state: DaemonState, req: Request, server: any): Promise<Response> {
+async function routeRequest(state: Daemon, req: Request, server: any): Promise<Response> {
   const url = new URL(req.url);
   const path = url.pathname;
 
@@ -217,7 +219,7 @@ async function routeRequest(state: DaemonState, req: Request, server: any): Prom
 
 // ---------- POST /mesh/join ----------
 
-async function handleJoinPost(state: DaemonState, req: Request): Promise<Response> {
+async function handleJoinPost(state: Daemon, req: Request): Promise<Response> {
   let body: JoinRequest;
   try {
     body = (await req.json()) as JoinRequest;
@@ -258,8 +260,7 @@ async function handleJoinPost(state: DaemonState, req: Request): Promise<Respons
       addresses: [],
     });
     const next = await loadConfig(cfgPath);
-    state.config = next;
-    state.refreshPeers();
+    state.reloadConfig(next);
   } catch (e) {
     return jsonResponse(500, { ok: false, error: `failed to update mesh.toml: ${(e as Error).message}` });
   }
@@ -282,7 +283,7 @@ function jsonResponse(status: number, body: unknown): Response {
 // ---------- POST /mesh/frame ----------
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function handleFramePost(state: DaemonState, req: Request, server: any): Promise<Response> {
+async function handleFramePost(state: Daemon, req: Request, server: any): Promise<Response> {
   const body = new Uint8Array(await req.arrayBuffer());
   let frame: Frame;
   try {
@@ -341,7 +342,7 @@ async function handleFramePost(state: DaemonState, req: Request, server: any): P
 // ---------- CI routes ----------
 
 async function handleCi(
-  state: DaemonState,
+  state: Daemon,
   req: Request,
   repo: string,
   tail: string,
@@ -377,7 +378,7 @@ async function handleCi(
   return textResponse(404, "not found");
 }
 
-async function handleCiPipelinesTab(state: DaemonState, repo: string): Promise<Response> {
+async function handleCiPipelinesTab(state: Daemon, repo: string): Promise<Response> {
   const repoCfg = state.config.repos.find((r) => r.name === repo);
   const repoAbsPath = repoCfg
     ? (path.isAbsolute(repoCfg.path) ? repoCfg.path : path.join(os.homedir(), repoCfg.path))
@@ -387,7 +388,7 @@ async function handleCiPipelinesTab(state: DaemonState, repo: string): Promise<R
   // Merge in-memory runs (current session) with persisted runs from disk so the
   // list survives daemon restarts and is visible on peers that don't have the
   // repo checked out locally. In-memory takes precedence for live status.
-  const inMemRuns = [...state.ci.runs.values()].filter((r) => r.repo === repo);
+  const inMemRuns = state.ci.allRuns().filter((r) => r.repo === repo);
   const inMemIds = new Set(inMemRuns.map((r) => r.run_id));
   const diskIndex = await listRuns(state.root, repo);
   const diskRuns = (
@@ -411,7 +412,7 @@ async function handleCiPipelinesTab(state: DaemonState, repo: string): Promise<R
   });
 }
 
-async function handleCiRunDetail(state: DaemonState, repo: string, runId: string): Promise<Response> {
+async function handleCiRunDetail(state: Daemon, repo: string, runId: string): Promise<Response> {
   const run = await loadRun(state.root, repo, runId);
   if (!run) return textResponse(404, "run not found");
   const log = run.status !== "running" ? await readLog(state.root, repo, runId) : "";
@@ -421,7 +422,7 @@ async function handleCiRunDetail(state: DaemonState, repo: string, runId: string
   });
 }
 
-async function handleCiManualRun(state: DaemonState, req: Request, repo: string): Promise<Response> {
+async function handleCiManualRun(state: Daemon, req: Request, repo: string): Promise<Response> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let form: any;
   try { form = await req.formData(); } catch {
@@ -434,12 +435,12 @@ async function handleCiManualRun(state: DaemonState, req: Request, repo: string)
   return new Response("", { status: 303, headers: { Location: `/repos/${encodeURIComponent(repo)}/ci` } });
 }
 
-function handleCiLogStream(state: DaemonState, repo: string, runId: string): Response {
+function handleCiLogStream(state: Daemon, repo: string, runId: string): Response {
   const encoder = new TextEncoder();
   let cancelled = false;
   const isDone = () => {
     if (cancelled) return true;
-    const run = state.ci.runs.get(runId);
+    const run = state.ci.getRun(runId);
     return run != null && run.status !== "running" && run.status !== "pending";
   };
 
@@ -502,7 +503,7 @@ function ciStatusBadge(status: string): string {
 }
 
 function renderCiPipelinesPage(
-  state: DaemonState,
+  state: Daemon,
   repo: string,
   runs: import("./ci/types.ts").PipelineRun[],
   hasPipeline: boolean,
@@ -648,7 +649,7 @@ es.addEventListener('run-changed', async () => {
 }
 
 function renderCiRunDetailPage(
-  state: DaemonState,
+  state: Daemon,
   repo: string,
   run: import("./ci/types.ts").PipelineRun,
   log: string,
@@ -753,7 +754,7 @@ function parseGitPath(p: string): ParsedPath | null {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function handleGit(state: DaemonState, req: Request, url: URL, server: any): Promise<Response> {
+async function handleGit(state: Daemon, req: Request, url: URL, server: any): Promise<Response> {
   const parsed = parseGitPath(url.pathname);
   if (!parsed) return textResponse(404, "not a mesh route");
 
@@ -820,7 +821,7 @@ async function handleGit(state: DaemonState, req: Request, url: URL, server: any
     const after = await gitp.branchHeads(dir);
     const changes = repoStore.diffRefSnapshots(before, after);
     if (changes.length > 0) {
-      const local = state.ensureRepo(parsed.repo);
+      const local = state.repos.ensure(parsed.repo);
       const head = await gitp.headSha(dir);
       if (head) local.lastHead = head;
       peerLink.broadcastRefUpdate(state, parsed.repo, changes, null);
@@ -831,10 +832,10 @@ async function handleGit(state: DaemonState, req: Request, url: URL, server: any
 
 // ---------- GET /status ----------
 
-function latestRunBadge(state: DaemonState, repo: string, now: number): string {
+function latestRunBadge(state: Daemon, repo: string, now: number): string {
   // Find the most recently completed run for this repo
   let latest: import("./ci/types.ts").PipelineRun | null = null;
-  for (const run of state.ci.runs.values()) {
+  for (const run of state.ci.allRuns()) {
     if (run.repo !== repo) continue;
     if (!latest || run.started_at > latest.started_at) latest = run;
   }
@@ -845,7 +846,7 @@ function latestRunBadge(state: DaemonState, repo: string, now: number): string {
   return `${ciStatusBadge(latest.status)} <a href="/repos/${esc(repo)}/ci/${esc(latest.run_id)}" style="font-size:11px;color:#666">${esc(age)}</a>`;
 }
 
-function renderStatusData(state: DaemonState): string {
+function renderStatusData(state: Daemon): string {
   const cfg = state.config;
   const me = cfg.self.name;
   const now = Date.now();
@@ -899,7 +900,7 @@ function renderStatusData(state: DaemonState): string {
 </div>`;
 }
 
-function handleStatusFragment(state: DaemonState): Response {
+function handleStatusFragment(state: Daemon): Response {
   return new Response(renderStatusData(state), {
     status: 200,
     headers: { "content-type": "text/html; charset=utf-8" },
@@ -941,7 +942,7 @@ function handleStatusEvents(): Response {
   });
 }
 
-function handleStatus(state: DaemonState): Response {
+function handleStatus(state: Daemon): Response {
   const cfg = state.config;
   const me = cfg.self.name;
   const myPub = state.identity.pubkeyString;
@@ -1013,13 +1014,13 @@ function textResponse(status: number, body: string): Response {
 
 // ---------- Issues ----------
 
-function authorShort(state: DaemonState): string {
+function authorShort(state: Daemon): string {
   const pub = state.identity.pubkeyString;
   return pub.startsWith("ed25519:") ? pub.slice(8, 14) : pub.slice(0, 6);
 }
 
 async function handleIssues(
-  state: DaemonState,
+  state: Daemon,
   req: Request,
   repo: string,
   tail: string,
@@ -1047,7 +1048,7 @@ async function handleIssues(
   return textResponse(404, "not found");
 }
 
-async function handleIssueAll(state: DaemonState, repo: string): Promise<Response> {
+async function handleIssueAll(state: Daemon, repo: string): Promise<Response> {
   const wire = await issues.listIssuesAsWire(state.root, repo);
   return new Response(JSON.stringify(wire), {
     status: 200,
@@ -1055,7 +1056,7 @@ async function handleIssueAll(state: DaemonState, repo: string): Promise<Respons
   });
 }
 
-async function handleIssueBoard(state: DaemonState, repo: string): Promise<Response> {
+async function handleIssueBoard(state: Daemon, repo: string): Promise<Response> {
   const all = await issues.listIssues(state.root, repo);
   return new Response(renderBoardPage(state, repo, all), {
     status: 200,
@@ -1063,7 +1064,7 @@ async function handleIssueBoard(state: DaemonState, repo: string): Promise<Respo
   });
 }
 
-async function handleIssueBoardFragment(state: DaemonState, repo: string): Promise<Response> {
+async function handleIssueBoardFragment(state: Daemon, repo: string): Promise<Response> {
   const all = await issues.listIssues(state.root, repo);
   return new Response(renderBoardGridForRepo(all, repo), {
     status: 200,
@@ -1072,7 +1073,7 @@ async function handleIssueBoardFragment(state: DaemonState, repo: string): Promi
 }
 
 async function handleIssueCreate(
-  state: DaemonState,
+  state: Daemon,
   req: Request,
   repo: string,
 ): Promise<Response> {
@@ -1104,7 +1105,7 @@ async function handleIssueCreate(
 }
 
 async function handleIssueComment(
-  state: DaemonState,
+  state: Daemon,
   req: Request,
   repo: string,
   id: string,
@@ -1130,7 +1131,7 @@ async function handleIssueComment(
 }
 
 async function handleIssueStatus(
-  state: DaemonState,
+  state: Daemon,
   req: Request,
   repo: string,
   id: string,
@@ -1158,7 +1159,7 @@ async function handleIssueStatus(
 }
 
 async function handleIssueOrder(
-  state: DaemonState,
+  state: Daemon,
   req: Request,
   repo: string,
   id: string,
@@ -1358,7 +1359,7 @@ function collectLabels(all: issues.Issue[]): string[] {
   return [...seen].sort();
 }
 
-function renderBoardPage(state: DaemonState, repo: string, all: issues.Issue[]): string {
+function renderBoardPage(state: Daemon, repo: string, all: issues.Issue[]): string {
   const me = state.config.self.name;
   const labels = collectLabels(all);
 

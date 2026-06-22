@@ -4,7 +4,7 @@
 import * as path from "node:path";
 import * as fs from "node:fs/promises";
 import * as net from "node:net";
-import type { DaemonState } from "./state.ts";
+import type { Daemon } from "./daemon.ts";
 import * as repoStore from "./repo_store.ts";
 import { onRefUpdate } from "./ci/scheduler.ts";
 
@@ -13,7 +13,6 @@ import {
   addPeerToConfig,
   addRepoToConfig,
   normalizePeerUrl,
-  savePendingInvites,
 } from "./config.ts";
 import { loadSecretsConfig, detectTools } from "./ci/config.ts";
 import {
@@ -37,7 +36,7 @@ export interface ControlResponse {
   [k: string]: unknown;
 }
 
-export async function run(state: DaemonState): Promise<net.Server> {
+export async function run(state: Daemon): Promise<net.Server> {
   const sockPath = path.join(state.root, "sock");
   try {
     await fs.unlink(sockPath);
@@ -109,7 +108,7 @@ export async function run(state: DaemonState): Promise<net.Server> {
   return server;
 }
 
-async function dispatch(state: DaemonState, req: ControlRequest): Promise<ControlResponse> {
+async function dispatch(state: Daemon, req: ControlRequest): Promise<ControlResponse> {
   const now = Date.now();
   switch (req.type) {
     case "status": {
@@ -140,15 +139,11 @@ async function dispatch(state: DaemonState, req: ControlRequest): Promise<Contro
       try {
         const next = await loadConfig(path.join(state.root, "mesh.toml"));
         state.config = next;
-        state.refreshPeers();
+        state.peers.refresh(state.config);
         await repoStore.ensureMirrors(state);
-        state.ciSecrets = await loadSecretsConfig(state.root);
+        state.ci.secrets = await loadSecretsConfig(state.root);
         const tools = await detectTools(next.runner.tools.length > 0 ? next.runner.tools : undefined);
-        if (state.ciCapabilities) {
-          state.ciCapabilities.labels = next.runner.labels;
-          state.ciCapabilities.runner = next.runner.enabled;
-          state.ciCapabilities.tools = tools;
-        }
+        state.ci.updateCapabilities(next.runner.labels, next.runner.enabled, tools);
         return { type: "ok" };
       } catch (e) {
         return { type: "error", message: (e as Error).message };
@@ -185,7 +180,7 @@ async function dispatch(state: DaemonState, req: ControlRequest): Promise<Contro
         const changed = await addPeerToConfig(cfgPath, { name, pubkey, addresses: address ? [address] : [] });
         const next = await loadConfig(cfgPath);
         state.config = next;
-        state.refreshPeers();
+        state.peers.refresh(state.config);
         if (address) await state.recordPeerAddress(name, address);
         return { type: "ok", changed } as ControlResponse;
       } catch (e) {
@@ -206,7 +201,7 @@ async function dispatch(state: DaemonState, req: ControlRequest): Promise<Contro
         const changed = await addRepoToConfig(cfgPath, { name, path: repoPath, branches });
         const next = await loadConfig(cfgPath);
         state.config = next;
-        state.refreshPeers();
+        state.peers.refresh(state.config);
         await repoStore.ensureMirrors(state);
         return { type: "ok", changed } as ControlResponse;
       } catch (e) {
@@ -235,7 +230,7 @@ async function dispatch(state: DaemonState, req: ControlRequest): Promise<Contro
           address,
         });
         sweepExpiredInvites(state);
-        await savePendingInvites(state.root, state.pendingInvites);
+        await state.savePendingInvites();
         return {
           type: "invite",
           token: encodeInviteToken(token),
@@ -269,7 +264,7 @@ async function dispatch(state: DaemonState, req: ControlRequest): Promise<Contro
         });
         const next = await loadConfig(cfgPath);
         state.config = next;
-        state.refreshPeers();
+        state.peers.refresh(state.config);
         await state.recordPeerAddress(parsed.inviterName, parsed.address);
       } catch (e) {
         return { type: "error", message: `mesh.toml update failed: ${(e as Error).message}` };
@@ -351,7 +346,7 @@ async function dispatch(state: DaemonState, req: ControlRequest): Promise<Contro
     }
     case "ci_cancel": {
       const runId = String(req.run_id ?? "");
-      const run = state.ci.runs.get(runId);
+      const run = state.ci.getRun(runId);
       if (!run) return { type: "error", message: `run ${runId} not found` };
       run.status = "cancelled";
       run.completed_at = new Date().toISOString();
@@ -377,7 +372,7 @@ async function dispatch(state: DaemonState, req: ControlRequest): Promise<Contro
   }
 }
 
-function peerSummaries(state: DaemonState, now: number): unknown[] {
+function peerSummaries(state: Daemon, now: number): unknown[] {
   return state.config.peers
     .filter((p) => p.name !== state.config.self.name)
     .map((p) => {
@@ -395,7 +390,7 @@ function peerSummaries(state: DaemonState, now: number): unknown[] {
     });
 }
 
-async function repoSummaries(state: DaemonState, now: number): Promise<unknown[]> {
+async function repoSummaries(state: Daemon, now: number): Promise<unknown[]> {
   const contributed = new Set(state.config.repos.map((r) => r.name));
   const allNames = new Set<string>(contributed);
   for (const k of state.repos.keys()) allNames.add(k);
@@ -420,7 +415,7 @@ async function repoSummaries(state: DaemonState, now: number): Promise<unknown[]
   });
 }
 
-function inferReachableAddress(state: DaemonState): string {
+function inferReachableAddress(state: Daemon): string {
   const listen = state.listenAddr;
   if (!listen) return "";
   // listen is "host:port" — if host is wildcard (0.0.0.0 / ::) we can't put it
@@ -437,7 +432,7 @@ function splitHostPort(s: string): [string, string] {
   return [s.slice(0, idx), s.slice(idx + 1)];
 }
 
-function sweepExpiredInvites(state: DaemonState): void {
+function sweepExpiredInvites(state: Daemon): void {
   const now = Date.now();
   for (const [k, v] of state.pendingInvites) {
     if (v.expiryMs < now) state.pendingInvites.delete(k);

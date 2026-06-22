@@ -370,6 +370,10 @@ export async function loadPendingInvites(root: string): Promise<Map<string, Pers
   }
 }
 
+export function defaultRoot(): string {
+  return path.join(os.homedir(), ".mesh");
+}
+
 export async function savePendingInvites(root: string, invites: Map<string, PersistedInvite>): Promise<void> {
   const obj: Record<string, PersistedInvite> = {};
   for (const [k, v] of invites) obj[k] = v;

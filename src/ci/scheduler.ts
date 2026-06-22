@@ -1,6 +1,6 @@
 // Push-triggered scheduling, capability matching, assignment protocol.
 
-import type { DaemonState } from "../state.ts";
+import type { Daemon } from "../daemon.ts";
 import type { Pipeline, PipelineRun, TriggerKind, NodeCapabilities, RunnerRequirements } from "./types.ts";
 import type { CiMessage } from "../proto.ts";
 import { signFrame } from "../proto.ts";
@@ -77,9 +77,9 @@ function pickBest(candidates: PeerCapabilityEntry[]): string {
   return sorted[0]!.name;
 }
 
-// ---------- build peer capability entries from DaemonState ----------
+// ---------- build peer capability entries from Daemon ----------
 
-function peerCapabilities(state: DaemonState): PeerCapabilityEntry[] {
+function peerCapabilities(state: Daemon): PeerCapabilityEntry[] {
   const entries: PeerCapabilityEntry[] = [];
   for (const [name, peer] of state.peers.entries()) {
     const caps = peer.capabilities;
@@ -103,7 +103,7 @@ function peerCapabilities(state: DaemonState): PeerCapabilityEntry[] {
 const ASSIGNMENT_TIMEOUT_MS = 5000;
 
 export async function onRefUpdate(
-  state: DaemonState,
+  state: Daemon,
   repo: string,
   ref: string,
   sha: string,
@@ -147,7 +147,7 @@ export async function onRefUpdate(
 }
 
 async function sendAssignment(
-  state: DaemonState,
+  state: Daemon,
   peer: string,
   run: PipelineRun,
   pipeline: Pipeline,
@@ -187,13 +187,13 @@ async function sendAssignment(
   }
 }
 
-function scheduleLocalRun(state: DaemonState, pipeline: Pipeline, run: PipelineRun): void {
-  state.ci.runs.set(run.run_id, run);
+function scheduleLocalRun(state: Daemon, pipeline: Pipeline, run: PipelineRun): void {
+  state.ci.setRun(run);
   state.notifyCiRunChanged(run.repo);
   void runLocalPipeline(state, pipeline, run);
 }
 
-async function runLocalPipeline(state: DaemonState, pipeline: Pipeline, run: PipelineRun): Promise<void> {
+async function runLocalPipeline(state: Daemon, pipeline: Pipeline, run: PipelineRun): Promise<void> {
   const { runPipeline } = await import("./engine.ts");
   const repoCfg = state.config.repos.find((r) => r.name === run.repo);
   if (!repoCfg) return;
@@ -218,9 +218,9 @@ async function runLocalPipeline(state: DaemonState, pipeline: Pipeline, run: Pip
     root: state.root,
     repoPath: worktreePath,
     runnerConfig: state.config.runner,
-    secrets: state.ciSecrets,
+    secrets: state.ci.secrets,
     onRunUpdate: async (updated) => {
-      state.ci.runs.set(updated.run_id, updated);
+      state.ci.setRun(updated);
       state.notifyCiRunChanged(updated.repo);
     },
   });
@@ -241,12 +241,12 @@ async function runLocalPipeline(state: DaemonState, pipeline: Pipeline, run: Pip
   void broadcastCiFrame(state, completedMsg).catch(() => {});
 
   // Cleanup log buffer
-  state.ci.log_buffers.delete(run.run_id);
+  state.ci.deleteLogBuffer(run.run_id);
 }
 
 // ---------- CI frame broadcast helpers ----------
 
-async function broadcastCiFrame(state: DaemonState, msg: CiMessage): Promise<void> {
+async function broadcastCiFrame(state: Daemon, msg: CiMessage): Promise<void> {
   const me = state.config.self.name;
   for (const p of state.config.peers) {
     if (p.name === me) continue;
@@ -277,7 +277,7 @@ async function broadcastCiFrame(state: DaemonState, msg: CiMessage): Promise<voi
 // ---------- inbound CiAssignment handler ----------
 
 export async function handleAssignment(
-  state: DaemonState,
+  state: Daemon,
   msg: Extract<CiMessage, { type: "CiAssignment" }>,
   sender?: string,
 ): Promise<void> {
@@ -307,7 +307,7 @@ export async function handleAssignment(
 
   if (!cfg.enabled) { await decline("runner not enabled"); return; }
 
-  const running = [...state.ci.runs.values()].filter((r) => r.status === "running").length;
+  const running = state.ci.allRuns().filter((r) => r.status === "running").length;
   if (running >= cfg.max_concurrent_jobs) { await decline("at capacity"); return; }
 
   // Send CiAccepted back to sender
@@ -343,7 +343,7 @@ export async function handleAssignment(
     started_at: new Date().toISOString(),
     jobs: {},
   };
-  state.ci.runs.set(run.run_id, run);
+  state.ci.setRun(run);
 
   // Broadcast CiStarted to all peers
   const startedMsg: CiMessage = { type: "CiStarted", run_id: run.run_id, repo: run.repo, runner: me, started_at: run.started_at };

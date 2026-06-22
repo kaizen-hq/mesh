@@ -5,7 +5,8 @@ import * as path from "node:path";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as toml from "./toml.ts";
-import { defaultRoot, DaemonState } from "./state.ts";
+import { defaultRoot } from "./config.ts";
+import { Daemon } from "./daemon.ts";
 import { loadConfig, seedConfig } from "./config.ts";
 import { loadOrCreate } from "./identity.ts";
 import * as control from "./control.ts";
@@ -322,13 +323,13 @@ async function cmdStart(root: string, args: Args) {
     `loaded config: self=${cfg.self.name} peers=${cfg.peers.length} repos=${cfg.repos.length} tls=${cfg.transport.tls}`,
   );
 
-  const state = await DaemonState.create(root, cfg, id);
+  const state = await Daemon.create(root, cfg, id);
   await repoStore.ensureMirrors(state);
 
   // Load secrets and detect capabilities from runner config in mesh.toml
-  state.ciSecrets = await loadSecretsConfig(root);
+  state.ci.secrets = await loadSecretsConfig(root);
   const tools = await detectTools(cfg.runner.tools.length > 0 ? cfg.runner.tools : undefined);
-  state.ciCapabilities = {
+  state.ci.capabilities = {
     os: process.platform,
     arch: process.arch,
     labels: cfg.runner.labels,
@@ -532,7 +533,7 @@ async function cmdCi(root: string, args: Args): Promise<void> {
   }
 }
 
-async function runCronLoop(state: DaemonState, intervalSecs: number): Promise<void> {
+async function runCronLoop(state: Daemon, intervalSecs: number): Promise<void> {
   const { loadPipeline } = await import("./ci/config.ts");
   while (true) {
     await new Promise((r) => setTimeout(r, Math.max(1, intervalSecs) * 1000));
@@ -547,7 +548,7 @@ async function runCronLoop(state: DaemonState, intervalSecs: number): Promise<vo
         }
       } catch { /* skip repos without CI config */ }
     }
-    const fires = checkCronSlots(specs, state.ci, now);
+    const fires = checkCronSlots(specs, state.ci.asCiState(), now);
     for (const fire of fires) {
       void import("./ci/scheduler.ts").then(({ onRefUpdate }) =>
         onRefUpdate(state, fire.repo, fire.job, fire.slotKey),
