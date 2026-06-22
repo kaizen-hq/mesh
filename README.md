@@ -238,19 +238,22 @@ enabled = false
 
 ### Registering repos on runner nodes
 
-Every node that will **execute** jobs for a repo must have the repo cloned
-locally and registered in its `mesh.toml`. Mesh uses the registered path to
-create a git worktree for each run — if the path is missing, the job stays
-`pending`.
+Every node that will **execute** jobs for a repo must have the repo registered
+in its `mesh.toml`:
 
 ```sh
-git clone <url> ~/src/my-app
 mesh add-repo my-app ~/src/my-app --branch main
 mesh reload
 ```
 
 `mesh add-repo` writes the entry to `mesh.toml`. `mesh reload` makes the
 running daemon pick it up immediately without a restart.
+
+A local working copy at the registered path is **not required**. Mesh creates
+each run's worktree from the bare mirror at `~/.mesh/repos/<name>.git`, which
+is populated automatically via peer sync. The registered path is only used as a
+bootstrap source to seed the mirror if it is empty when the first run arrives —
+and even then, failure is non-fatal if the mirror has already synced from peers.
 
 Nodes that are not runners (or have `enabled = false`) do not need the repo
 registered — they participate in assignment and show run history in the
