@@ -321,7 +321,7 @@ The browser dashboard at `/status` links to per-repo views:
 | `/repos/:name` | Redirects to `/repos/:name/ci` |
 | `/repos/:name/ci` | Pipeline run list with status badges, manual trigger form |
 | `/repos/:name/ci/:run_id` | Run detail with per-job status and live log stream |
-| `/repos/:name/issues` | Kanban issues board |
+| `/repos/:name/issues` | Issues board |
 
 Both the pipelines page and the issues board have a shared nav bar:
 **issues · pipelines**.

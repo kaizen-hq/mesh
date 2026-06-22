@@ -1,6 +1,8 @@
 #!/usr/bin/env bun
 // CLI dispatch.
 
+process.title = "mesh";
+
 import * as path from "node:path";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
