@@ -77,7 +77,7 @@ export interface NodeCapabilities {
   };
 }
 
-// ---------- ci state (in DaemonState) ----------
+// ---------- ci state ----------
 
 export interface CiState {
   runs: Map<string, PipelineRun>;

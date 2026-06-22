@@ -1,8 +1,15 @@
 // CI HTTP routes: peer sync + log chunk pull.
 
-import type { DaemonState } from "../state.ts";
+import type { CiDomain } from "./ci_domain.ts";
+import type { Config } from "../config.ts";
 import { loadRun, listRuns, readLog } from "./store.ts";
 import type { PipelineRun } from "./types.ts";
+
+export interface CiHttpCtx {
+  ci: CiDomain;
+  config: Config;
+  root: string;
+}
 
 function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -18,7 +25,7 @@ function text(status: number, body: string): Response {
 // ---------- GET /mesh/ci/:repo/runs ----------
 // Returns all PipelineRun records for a repo. Used by peers for full sync.
 
-export async function handleCiRunsList(state: DaemonState, repo: string): Promise<Response> {
+export async function handleCiRunsList(state: CiHttpCtx, repo: string): Promise<Response> {
   const index = await listRuns(state.root, repo);
   const runs: PipelineRun[] = [];
   for (const entry of index) {
@@ -32,13 +39,13 @@ export async function handleCiRunsList(state: DaemonState, repo: string): Promis
 // Returns log chunks starting from seq N for gap repair.
 
 export async function handleLogChunks(
-  state: DaemonState,
+  state: CiHttpCtx,
   runId: string,
   fromSeq: number,
 ): Promise<Response> {
   // Find which repo owns this runId
   let repo: string | null = null;
-  for (const [, run] of state.ci.runs) {
+  for (const run of state.ci.allRuns()) {
     if (run.run_id === runId) { repo = run.repo; break; }
   }
   if (!repo) {
@@ -50,14 +57,14 @@ export async function handleLogChunks(
   }
   if (!repo) return text(404, "run not found");
 
-  const buf = state.ci.log_buffers.get(runId);
+  const buf = state.ci.getLogBuffer(runId);
   const fromBuffer = buf ? buf.chunks.filter((c) => c.seq >= fromSeq) : [];
   return json(200, fromBuffer);
 }
 
 // ---------- route dispatcher ----------
 
-export async function route(state: DaemonState, req: Request, urlPath: string): Promise<Response | null> {
+export async function route(state: CiHttpCtx, req: Request, urlPath: string): Promise<Response | null> {
   // GET /mesh/ci/:repo/runs
   const syncMatch = /^\/mesh\/ci\/([^/]+)\/runs$/.exec(urlPath);
   if (syncMatch && req.method === "GET") {

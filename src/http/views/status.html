@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>mesh status — {{me}}</title>
+<link rel="stylesheet" href="/static/mesh.css">
+</head>
+<body class="page-status">
+<h1>mesh — <code>{{me}}</code></h1>
+<div class="summary">
+  pubkey <code>ed25519:{{pubkey_short}}…</code> &middot; listening <code>{{scheme}}</code> &middot; config hash <code>{{cfg_short}}</code>
+</div>
+
+{{status_data}}
+
+<footer><code>GET /status</code> &middot; built on Bun</footer>
+
+<script>
+const es = new EventSource('/status/events');
+es.addEventListener('status-changed', async () => {
+  try {
+    const html = await fetch('/status/fragment').then(r => r.text());
+    const tmp = document.createElement('div');
+    tmp.innerHTML = html;
+    document.getElementById('status-data').replaceWith(tmp.firstElementChild);
+  } catch {}
+});
+</script>
+</body>
+</html>

@@ -1,7 +1,26 @@
 // Push-only peer link: POST signed Frames to peers, retry on failure with
 // exponential backoff. Mirror of src/peer_link.rs.
 
-import type { DaemonState } from "./state.ts";
+import type { Config } from "./config.ts";
+import type { PeerRegistry } from "./peer_registry.ts";
+import type { RepoRegistry } from "./repo_registry.ts";
+import type { OutboundQueues } from "./outbound_queues.ts";
+import type { CiDomain } from "./ci/ci_domain.ts";
+import type { Identity } from "./identity.ts";
+
+export interface PeerLinkCtx {
+  config: Config;
+  root: string;
+  identity: Identity;
+  peers: PeerRegistry;
+  repos: RepoRegistry;
+  outbound: OutboundQueues;
+  ci: CiDomain;
+  notifyStatusChanged(): void;
+  notifyIssueChanged(repo: string): void;
+  notifyCiRunChanged(repo: string): void;
+  recordPeerAddress(peer: string, address: string): Promise<boolean>;
+}
 import { normalizePeerUrl } from "./config.ts";
 import {
   encodeFrame,
@@ -37,7 +56,7 @@ function isValidRepoName(name: string): boolean {
 // ---------- inbound frame handling ----------
 
 export async function handleInboundFrame(
-  state: DaemonState,
+  state: PeerLinkCtx,
   sender: string,
   msg: Message,
 ): Promise<void> {
@@ -55,7 +74,7 @@ export async function handleInboundFrame(
           console.warn(`peer ${sender}: ignoring invalid repo name ${JSON.stringify(r.name)}`);
           continue;
         }
-        state.ensureRepo(r.name).noteSource(sender);
+        state.repos.ensure(r.name).noteSource(sender);
       }
       const validRepos = msg.repos.filter((r) => isValidRepoName(r.name));
       scheduleReconcileIfStale(state, sender, validRepos);
@@ -90,7 +109,7 @@ export async function handleInboundFrame(
 }
 
 async function handleInboundCiFrame(
-  state: DaemonState,
+  state: PeerLinkCtx,
   sender: string,
   msg: import("./proto.ts").CiMessage,
 ): Promise<void> {
@@ -107,7 +126,7 @@ async function handleInboundCiFrame(
       handleCiRunUpdate(state, msg);
       break;
     case "CiCronClaim": {
-      const claim = state.ci.cron_claims.get(msg.slot);
+      const claim = state.ci.getCronClaim(msg.slot);
       if (claim && !claim.started) {
         claim.claims.push({ claimer: msg.claimer, capability_hash: msg.capability_hash });
       }
@@ -116,10 +135,10 @@ async function handleInboundCiFrame(
   }
 }
 
-function handleCiRunUpdate(state: DaemonState, msg: import("./proto.ts").CiMessage): void {
+function handleCiRunUpdate(state: PeerLinkCtx, msg: import("./proto.ts").CiMessage): void {
   switch (msg.type) {
     case "CiStarted": {
-      const run = state.ci.runs.get(msg.run_id);
+      const run = state.ci.getRun(msg.run_id);
       if (run) {
         run.status = "running";
         run.runner = msg.runner;
@@ -129,7 +148,7 @@ function handleCiRunUpdate(state: DaemonState, msg: import("./proto.ts").CiMessa
       break;
     }
     case "CiCompleted": {
-      const run = state.ci.runs.get(msg.run_id);
+      const run = state.ci.getRun(msg.run_id);
       if (run) {
         run.status = msg.status;
         run.completed_at = new Date().toISOString();
@@ -139,7 +158,7 @@ function handleCiRunUpdate(state: DaemonState, msg: import("./proto.ts").CiMessa
       break;
     }
     case "CiLog": {
-      const buf = state.ci.log_buffers.get(msg.run_id);
+      const buf = state.ci.getLogBuffer(msg.run_id);
       if (buf) {
         buf.chunks.push({ seq: msg.seq, t: msg.t, stream: msg.stream, data: msg.data });
       }
@@ -149,12 +168,12 @@ function handleCiRunUpdate(state: DaemonState, msg: import("./proto.ts").CiMessa
 }
 
 async function handleInboundRefUpdate(
-  state: DaemonState,
+  state: PeerLinkCtx,
   sender: string,
   repo: string,
   _refs: RefChange[],
 ): Promise<void> {
-  const local = state.ensureRepo(repo);
+  const local = state.repos.ensure(repo);
   local.noteSource(sender);
 
   let outcome;
@@ -195,7 +214,7 @@ async function handleInboundRefUpdate(
 }
 
 function scheduleReconcileIfStale(
-  state: DaemonState,
+  state: PeerLinkCtx,
   peer: string,
   advertised: RepoStatus[],
 ): void {
@@ -263,10 +282,10 @@ async function postFrame(baseUrl: string, frame: Frame): Promise<boolean> {
   }
 }
 
-async function sendTo(state: DaemonState, peer: string, frame: Frame): Promise<void> {
+async function sendTo(state: PeerLinkCtx, peer: string, frame: Frame): Promise<void> {
   const entry = state.peers.get(peer);
   if (!entry || entry.addresses.length === 0) {
-    state.enqueueFor(peer, frame);
+    state.outbound.enqueue(peer, frame);
     return;
   }
   for (const addr of entry.addresses) {
@@ -281,19 +300,19 @@ async function sendTo(state: DaemonState, peer: string, frame: Frame): Promise<v
       return;
     }
   }
-  state.enqueueFor(peer, frame);
+  state.outbound.enqueue(peer, frame);
 }
 
 // ---------- retry loop ----------
 
-export async function runRetryLoop(state: DaemonState): Promise<void> {
+export async function runRetryLoop(state: PeerLinkCtx): Promise<void> {
   const backoffs = new Map<string, number>(); // peer → backoff secs
   const lastAttempt = new Map<string, number>(); // peer → epoch ms
 
   while (true) {
     await sleep(RETRY_TICK_SECS * 1000);
 
-    const peers = [...state.outbound.keys()];
+    const peers = [...state.outbound.destinations()];
     for (const peer of peers) {
       const backoff = backoffs.get(peer) ?? 0;
       if (backoff > 0) {
@@ -301,13 +320,7 @@ export async function runRetryLoop(state: DaemonState): Promise<void> {
         if (Date.now() - last < backoff * 1000) continue;
       }
 
-      const q = state.outbound.get(peer);
-      if (!q) {
-        backoffs.delete(peer);
-        lastAttempt.delete(peer);
-        continue;
-      }
-      const frames = q.drain();
+      const frames = state.outbound.drain(peer);
       if (frames.length === 0) {
         backoffs.delete(peer);
         lastAttempt.delete(peer);
@@ -316,7 +329,7 @@ export async function runRetryLoop(state: DaemonState): Promise<void> {
 
       const entry = state.peers.get(peer);
       if (!entry || entry.addresses.length === 0) {
-        for (const f of frames) state.enqueueFor(peer, f);
+        for (const f of frames) state.outbound.enqueue(peer, f);
         continue;
       }
 
@@ -339,7 +352,7 @@ export async function runRetryLoop(state: DaemonState): Promise<void> {
         remaining = remaining.slice(i);
       }
       // Re-enqueue anything that couldn't be delivered.
-      for (const f of remaining) state.enqueueFor(peer, f);
+      for (const f of remaining) state.outbound.enqueue(peer, f);
 
       lastAttempt.set(peer, Date.now());
       if (successAddr !== null) {
@@ -358,7 +371,7 @@ export async function runRetryLoop(state: DaemonState): Promise<void> {
 
 // ---------- heartbeat / hello ----------
 
-export async function runHeartbeat(state: DaemonState, secs: number): Promise<void> {
+export async function runHeartbeat(state: PeerLinkCtx, secs: number): Promise<void> {
   const intervalMs = Math.max(1, secs) * 1000;
   while (true) {
     await sleep(intervalMs);
@@ -373,7 +386,7 @@ export async function runHeartbeat(state: DaemonState, secs: number): Promise<vo
         name: me,
         config_hash: raw_hash,
         repos,
-        capabilities: state.ciCapabilities ?? undefined,
+        capabilities: state.ci.capabilities ?? undefined,
       };
       let frame: Frame;
       try {
@@ -387,7 +400,7 @@ export async function runHeartbeat(state: DaemonState, secs: number): Promise<vo
   }
 }
 
-export async function runInitialHello(state: DaemonState): Promise<void> {
+export async function runInitialHello(state: PeerLinkCtx): Promise<void> {
   const me = state.config.self.name;
   for (const p of state.config.peers) {
     if (p.name === me) continue;
@@ -409,7 +422,7 @@ export async function runInitialHello(state: DaemonState): Promise<void> {
 // ---------- RefUpdate broadcast ----------
 
 export function broadcastRefUpdate(
-  state: DaemonState,
+  state: PeerLinkCtx,
   repo: string,
   refs: Array<{ name: string; old_sha: string; new_sha: string }>,
   skip: string | null,
@@ -447,7 +460,7 @@ function sleep(ms: number): Promise<void> {
 
 // ---------- issue event broadcast ----------
 
-export function broadcastIssueEvent(state: DaemonState, event: IssueEvent): void {
+export function broadcastIssueEvent(state: PeerLinkCtx, event: IssueEvent): void {
   void (async () => {
     const me = state.config.self.name;
     for (const p of state.config.peers) {
@@ -466,7 +479,7 @@ export function broadcastIssueEvent(state: DaemonState, event: IssueEvent): void
 // ---------- issue full sync (pull) ----------
 
 export async function pullIssuesFromPeer(
-  state: DaemonState,
+  state: PeerLinkCtx,
   peer: string,
   repo: string,
 ): Promise<void> {
@@ -500,7 +513,7 @@ export async function pullIssuesFromPeer(
 }
 
 function scheduleIssueSyncIfStale(
-  state: DaemonState,
+  state: PeerLinkCtx,
   peer: string,
   advertised: RepoStatus[],
 ): void {
@@ -527,7 +540,7 @@ function scheduleIssueSyncIfStale(
 // ---------- CI run full sync (pull) ----------
 
 export async function pullCiRunsFromPeer(
-  state: DaemonState,
+  state: PeerLinkCtx,
   peer: string,
   repo: string,
 ): Promise<void> {
@@ -552,10 +565,10 @@ export async function pullCiRunsFromPeer(
       for (const run of peerRuns) {
         // Only persist runs we don't already have on disk, or where the peer
         // has a terminal status and we have a non-terminal one (stale in-memory).
-        const existing = state.ci.runs.get(run.run_id);
+        const existing = state.ci.getRun(run.run_id);
         const isTerminal = (s: string) => s === "passed" || s === "failed" || s === "cancelled";
         if (!existing || (!isTerminal(existing.status) && isTerminal(run.status))) {
-          state.ci.runs.set(run.run_id, run);
+          state.ci.setRun(run);
           await saveRun(state.root, run);
         }
       }
@@ -570,7 +583,7 @@ export async function pullCiRunsFromPeer(
 }
 
 function scheduleCiSyncIfStale(
-  state: DaemonState,
+  state: PeerLinkCtx,
   peer: string,
   advertised: RepoStatus[],
 ): void {

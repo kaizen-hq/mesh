@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>run {{run_id_short}} — {{repo}}</title>
+<link rel="stylesheet" href="/static/mesh.css">
+</head>
+<body>
+<h1><a href="/status">{{me}}</a> / <a href="/repos/{{repo_enc}}/ci">{{repo}} pipelines</a> / run <code>{{run_id_short}}</code></h1>
+<div class="meta">
+  {{status_badge}} &middot;
+  ref <code>{{ref}}</code> &middot;
+  sha <code>{{sha7}}</code> &middot;
+  {{trigger}} &middot;
+  runner <code>{{runner}}</code> &middot;
+  {{duration}}
+</div>
+
+<h2>jobs</h2>
+<table>
+  <thead><tr><th>job</th><th>status</th><th>duration</th><th>exit code</th></tr></thead>
+  <tbody>{{job_rows}}</tbody>
+</table>
+
+<h2>log</h2>
+{{log_block}}
+
+<footer><a href="/repos/{{repo_enc}}/ci">&larr; back to pipelines</a></footer>
+</body>
+</html>
