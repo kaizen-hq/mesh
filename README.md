@@ -87,8 +87,8 @@ mesh add-address <peer> <addr>                # bootstrap a known address for a 
 mesh invite --addr HOST:PORT [--ttl SECS]     # generate a one-time pairing token (default TTL: 600s)
 mesh join <token>                             # accept a pairing token
 mesh url <repo>                               # print the local git URL for a repo
-mesh update                                   # update mesh binary from current serve-install peer
-mesh update-code                              # update mesh source from current serve-install-code peer
+mesh update                                   # update mesh to the latest release
+mesh update --from <peer>                     # update from a peer running mesh serve-install
 
 # CI/CD
 mesh ci status [<repo>]                # show recent pipeline runs
@@ -97,6 +97,34 @@ mesh ci logs <repo> <run_id>           # print build log
 mesh ci cancel <run_id>                # cancel a running job
 mesh ci runners                        # list peers and their CI capabilities
 ```
+
+### Cloning and pushing
+
+Mesh serves git smart-HTTP at `https://localhost:7979/<repo>.git` (or `http://`
+if you started with `transport.tls = false`).
+
+Because the TLS certificate is self-signed, tell git not to verify it for this
+origin before cloning or pushing. This is scoped to `localhost:7979` only and
+does not affect other remotes:
+
+```sh
+git config --global http.https://localhost:7979.sslVerify false
+```
+
+Clone a repo from the local mesh node:
+
+```sh
+git clone https://localhost:7979/my-app.git
+```
+
+Or add it as a remote to an existing working copy and push:
+
+```sh
+git remote add mesh https://localhost:7979/my-app.git
+git push mesh main
+```
+
+`mesh url <repo>` prints the full remote URL if you need it.
 
 ## CI/CD
 
