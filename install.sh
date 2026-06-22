@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 # mesh installer — downloads source from GitHub and installs via bun.
 #
-# Usage (latest main):
+# Usage (latest release):
 #   curl -fsSL https://raw.githubusercontent.com/kaizen-hq/mesh/main/install.sh | bash
 #
 # Usage (pinned tag):
 #   curl -fsSL https://raw.githubusercontent.com/kaizen-hq/mesh/main/install.sh | MESH_REF=v1.2.3 bash
 #
+# Usage (bleeding edge main branch):
+#   curl -fsSL https://raw.githubusercontent.com/kaizen-hq/mesh/main/install.sh | MESH_REF=main bash
+#
 # Environment overrides:
 #   MESH_REPO      GitHub "owner/repo"  (default: kaizen-hq/mesh)
-#   MESH_REF       branch, tag, or SHA  (default: main)
+#   MESH_REF       branch, tag, or SHA  (default: latest release tag)
 #   INSTALL_DIR    where source lands   (default: ~/.local/share/mesh)
 #   BIN_DIR        where shim lands     (default: ~/.local/bin)
 
@@ -28,9 +31,19 @@ need unzip "brew install unzip  (or apt install unzip)"
 need curl  "brew install curl   (or apt install curl)"
 
 MESH_REPO="${MESH_REPO:-kaizen-hq/mesh}"
-MESH_REF="${MESH_REF:-main}"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/share/mesh}"
 BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
+
+# Resolve MESH_REF: if unset, fetch the latest release tag from the GitHub API.
+if [[ -z "${MESH_REF:-}" ]]; then
+  MESH_REF="$(curl -fsSL "https://api.github.com/repos/$MESH_REPO/releases/latest" \
+    | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')"
+  if [[ -z "$MESH_REF" ]]; then
+    echo "error: could not resolve latest release from GitHub API" >&2
+    exit 1
+  fi
+  echo "==> resolved latest release: $MESH_REF"
+fi
 
 mkdir -p "$INSTALL_DIR" "$BIN_DIR"
 
