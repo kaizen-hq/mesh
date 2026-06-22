@@ -53,7 +53,7 @@ cd mesh
 bun install
 ```
 
-Requires Bun 1.1+. `git` and `openssl` (only for HTTPS mode) must be on `PATH`.
+Requires Bun 1.1+. `git` must be on `PATH`.
 
 Run directly without compiling:
 
