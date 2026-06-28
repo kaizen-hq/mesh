@@ -280,7 +280,8 @@ export async function setupWorktree(
   });
   await proc.exited;
   if (proc.exitCode !== 0) {
-    throw new Error(`git worktree add failed with exit code ${proc.exitCode}`);
+    const stderr = await new Response(proc.stderr).text();
+    throw new Error(`git worktree add ${sha} failed (exit ${proc.exitCode}): ${stderr.trim()}`);
   }
   return dest;
 }
