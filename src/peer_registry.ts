@@ -58,7 +58,11 @@ export class PeerRegistry {
       if (p.name === config.self.name) continue;
       const entry = new PeerEntry();
       const cached = registry.addressCache.addresses[p.name] ?? [];
-      entry.addresses = [...cached, ...p.addresses.filter((a) => !cached.includes(a))];
+      // Static addresses from mesh.toml take priority over cached discoveries.
+      // Cached addresses are kept as fallback for peers with no static config.
+      entry.addresses = p.addresses.length > 0
+        ? [...p.addresses, ...cached.filter((a) => !p.addresses.includes(a))]
+        : [...cached];
       registry.peers.set(p.name, entry);
     }
     return registry;
@@ -83,7 +87,9 @@ export class PeerRegistry {
       if (this.peers.has(p.name)) continue;
       const entry = new PeerEntry();
       const cached = this.addressCache.addresses[p.name] ?? [];
-      entry.addresses = [...cached, ...p.addresses.filter((a) => !cached.includes(a))];
+      entry.addresses = p.addresses.length > 0
+        ? [...p.addresses, ...cached.filter((a) => !p.addresses.includes(a))]
+        : [...cached];
       this.peers.set(p.name, entry);
     }
   }

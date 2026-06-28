@@ -118,15 +118,29 @@ export async function onManualRun(
   ref: string,
   sha: string,
 ): Promise<void> {
+  console.log(`[ci] manual run requested: repo=${repo} ref=${ref} sha=${sha.slice(0, 7)}`);
+
   const repoCfg = state.config.repos.find((r) => r.name === repo);
-  if (!repoCfg) return;
+  if (!repoCfg) {
+    console.log(`[ci] manual run aborted: repo ${repo} not found in config`);
+    return;
+  }
 
   const repoAbsPath = path.isAbsolute(repoCfg.path)
     ? repoCfg.path
     : path.join(os.homedir(), repoCfg.path);
-  const pipeline = await loadPipeline(repoAbsPath).catch(() => null);
-  if (!pipeline) return;
-  if (!pipeline.on.manual) return;
+  const pipeline = await loadPipeline(repoAbsPath).catch((e) => {
+    console.log(`[ci] manual run aborted: failed to load pipeline for ${repo}: ${(e as Error).message}`);
+    return null;
+  });
+  if (!pipeline) {
+    console.log(`[ci] manual run aborted: no .mesh/mesh-ci.yml found for ${repo}`);
+    return;
+  }
+  if (!pipeline.on.manual) {
+    console.log(`[ci] manual run aborted: pipeline for ${repo} does not have manual: true`);
+    return;
+  }
 
   const runId = crypto.randomUUID();
   const trigger: TriggerKind = { type: "manual", initiator: state.config.self.name };
@@ -144,11 +158,14 @@ export async function onManualRun(
   };
 
   const candidates = peerCapabilities(state);
+  console.log(`[ci] runner candidates: [${candidates.map((c) => `${c.name}(runner=${c.runner},jobs=${c.jobs_running}/${c.max_concurrent_jobs})`).join(", ")}]`);
   const selectedPeer = selectRunner(candidates, pipeline.runner);
 
   if (selectedPeer) {
+    console.log(`[ci] assigning run ${runId} to peer ${selectedPeer}`);
     await sendAssignment(state, selectedPeer, run, pipeline, trigger);
   } else {
+    console.log(`[ci] no peer runner available, running ${runId} locally`);
     scheduleLocalRun(state, pipeline, run);
   }
 }
@@ -163,17 +180,34 @@ export async function onRefUpdate(
   ref: string,
   sha: string,
 ): Promise<void> {
+  console.log(`[ci] ref update: repo=${repo} ref=${ref} sha=${sha.slice(0, 7)}`);
+
   // Find the repo path to load mesh-ci.yml
   const repoCfg = state.config.repos.find((r) => r.name === repo);
-  if (!repoCfg) return;
+  if (!repoCfg) {
+    console.log(`[ci] push trigger aborted: repo ${repo} not found in config`);
+    return;
+  }
 
   const repoAbsPath = path.isAbsolute(repoCfg.path)
     ? repoCfg.path
     : path.join(os.homedir(), repoCfg.path);
-  const pipeline = await loadPipeline(repoAbsPath).catch(() => null);
-  if (!pipeline) return;
-  if (!pipeline.on.push) return;
-  if (!matchesBranch(ref, pipeline.on.push.branches)) return;
+  const pipeline = await loadPipeline(repoAbsPath).catch((e) => {
+    console.log(`[ci] push trigger aborted: failed to load pipeline for ${repo}: ${(e as Error).message}`);
+    return null;
+  });
+  if (!pipeline) {
+    console.log(`[ci] push trigger aborted: no .mesh/mesh-ci.yml found for ${repo}`);
+    return;
+  }
+  if (!pipeline.on.push) {
+    console.log(`[ci] push trigger aborted: pipeline for ${repo} has no on.push configured`);
+    return;
+  }
+  if (!matchesBranch(ref, pipeline.on.push.branches)) {
+    console.log(`[ci] push trigger aborted: ref ${ref} does not match branch filters [${pipeline.on.push.branches.join(", ")}]`);
+    return;
+  }
 
   const runId = crypto.randomUUID();
   const trigger: TriggerKind = { type: "push", pusher: state.config.self.name };
@@ -191,12 +225,14 @@ export async function onRefUpdate(
   };
 
   const candidates = peerCapabilities(state);
+  console.log(`[ci] runner candidates: [${candidates.map((c) => `${c.name}(runner=${c.runner},jobs=${c.jobs_running}/${c.max_concurrent_jobs})`).join(", ")}]`);
   const selectedPeer = selectRunner(candidates, pipeline.runner);
 
   if (selectedPeer) {
+    console.log(`[ci] assigning run ${runId} to peer ${selectedPeer}`);
     await sendAssignment(state, selectedPeer, run, pipeline, trigger);
   } else {
-    // Run locally as fallback
+    console.log(`[ci] no peer runner available, running ${runId} locally`);
     scheduleLocalRun(state, pipeline, run);
   }
 }
@@ -221,7 +257,10 @@ async function sendAssignment(
   const me = state.config.self.name;
   const frame = await signFrame(me, peer, { kind: "CiFrame", msg }, state.identity.privateKey);
   const entry = state.peers.get(peer);
-  if (!entry) return;
+  if (!entry) {
+    console.log(`[ci] assignment failed: peer ${peer} not in registry`);
+    return;
+  }
 
   for (const addr of entry.addresses) {
     const { baseUrl } = normalizePeerUrl(addr, state.config.transport.tls);
@@ -237,9 +276,17 @@ async function sendAssignment(
     };
     try {
       const resp = await fetch(`${baseUrl}/mesh/frame`, init);
-      if (resp.ok) { clearTimeout(timer); return; }
-    } catch { /* try next addr */ } finally { clearTimeout(timer); }
+      if (resp.ok) {
+        console.log(`[ci] assignment ${run.run_id} delivered to ${peer} via ${addr}`);
+        clearTimeout(timer);
+        return;
+      }
+      console.log(`[ci] assignment to ${peer} via ${addr} returned HTTP ${resp.status}`);
+    } catch (e) {
+      console.log(`[ci] assignment to ${peer} via ${addr} failed: ${(e as Error).message}`);
+    } finally { clearTimeout(timer); }
   }
+  console.log(`[ci] assignment ${run.run_id} could not be delivered to ${peer} (all addresses failed)`);
 }
 
 function scheduleLocalRun(state: SchedulerCtx, pipeline: Pipeline, run: PipelineRun): void {
@@ -249,9 +296,13 @@ function scheduleLocalRun(state: SchedulerCtx, pipeline: Pipeline, run: Pipeline
 }
 
 async function runLocalPipeline(state: SchedulerCtx, pipeline: Pipeline, run: PipelineRun): Promise<void> {
+  console.log(`[ci] starting local run ${run.run_id} for ${run.repo} @ ${run.ref}`);
   const { runPipeline } = await import("./engine.ts");
   const repoCfg = state.config.repos.find((r) => r.name === run.repo);
-  if (!repoCfg) return;
+  if (!repoCfg) {
+    console.log(`[ci] local run ${run.run_id} aborted: repo ${run.repo} not found in config`);
+    return;
+  }
   const mirrorPath = repoStore.mirrorPath(state.root, run.repo);
 
   // Ensure the mirror has commits before creating a worktree. The fetch loop
@@ -262,8 +313,9 @@ async function runLocalPipeline(state: SchedulerCtx, pipeline: Pipeline, run: Pi
     : path.join(os.homedir(), repoCfg.path);
   try {
     await git.fetchIntoBare(mirrorPath, workingCopyPath);
-  } catch {
-    // Non-fatal: mirror may already be up to date or working copy may not exist.
+    console.log(`[ci] mirror refreshed for ${run.repo}`);
+  } catch (e) {
+    console.log(`[ci] mirror refresh for ${run.repo} failed (continuing): ${(e as Error).message}`);
   }
 
   const worktreePath = mirrorPath;
@@ -280,6 +332,9 @@ async function runLocalPipeline(state: SchedulerCtx, pipeline: Pipeline, run: Pi
     },
   });
 
+  const duration = Date.now() - started;
+  console.log(`[ci] run ${run.run_id} completed: status=${completed.status} duration=${duration}ms`);
+
   // Broadcast CiCompleted to all peers
   const { sha256Hex } = await import("../proto.ts");
   const { readLog } = await import("./store.ts");
@@ -290,7 +345,7 @@ async function runLocalPipeline(state: SchedulerCtx, pipeline: Pipeline, run: Pi
     run_id: run.run_id,
     repo: run.repo,
     status: completed.status === "passed" ? "passed" : "failed",
-    duration_ms: Date.now() - started,
+    duration_ms: duration,
     log_hash: logHash,
   };
   void broadcastCiFrame(state, completedMsg).catch(() => {});
@@ -340,6 +395,7 @@ export async function handleAssignment(
   const me = state.config.self.name;
 
   const decline = async (reason: string) => {
+    console.log(`[ci] declining assignment ${msg.run_id} from ${sender ?? "unknown"}: ${reason}`);
     if (!sender) return;
     const declineMsg: CiMessage = { type: "CiDeclined", run_id: msg.run_id, runner: me, reason };
     try {
@@ -364,6 +420,8 @@ export async function handleAssignment(
 
   const running = state.ci.allRuns().filter((r) => r.status === "running").length;
   if (running >= cfg.max_concurrent_jobs) { await decline("at capacity"); return; }
+
+  console.log(`[ci] accepted assignment ${msg.run_id} for ${msg.repo} @ ${msg.ref} from ${sender ?? "self"}`);
 
   // Send CiAccepted back to sender
   if (sender) {

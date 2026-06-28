@@ -190,7 +190,7 @@ async function routeRequest(state: Daemon, views: Views, req: Request, server: a
     return handleStatusFragment(state);
   }
   if (path === "/mesh/frame" && req.method === "POST") {
-    return handleFramePost(state, req, server);
+    return handleFramePost(state, req);
   }
   if (path === "/mesh/join" && req.method === "POST") {
     return handleJoinPost(state, req);
@@ -291,8 +291,7 @@ function jsonResponse(status: number, body: unknown): Response {
 
 // ---------- POST /mesh/frame ----------
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function handleFramePost(state: Daemon, req: Request, server: any): Promise<Response> {
+async function handleFramePost(state: Daemon, req: Request): Promise<Response> {
   const body = new Uint8Array(await req.arrayBuffer());
   let frame: Frame;
   try {
@@ -324,24 +323,6 @@ async function handleFramePost(state: Daemon, req: Request, server: any): Promis
   }
 
   await peerLink.handleInboundFrame(state, frame.sender, msg);
-
-  // Only auto-discover the source IP when the peer has no statically configured
-  // addresses in mesh.toml. If a hostname is configured, trust it — using the
-  // raw TCP source IP would overwrite it in peer_addresses.toml and take
-  // priority on the next connection attempt.
-  if (peerEntry.addresses.length === 0) {
-    const sourceIp: string | undefined = server?.requestIP?.(req)?.address;
-    if (sourceIp) {
-      // Re-use the port from their most recently known address, falling back to
-      // the default peer port.  The TCP source port is ephemeral; what we want
-      // is the port they're listening on.
-      const fallbackPort = String(state.config.self.peer_port);
-      const knownPort = state.peers.get(frame.sender)?.addresses[0]?.split(":").at(-1) ?? fallbackPort;
-      // Bracket IPv6 addresses so the result is a valid host:port string.
-      const host = sourceIp.includes(":") ? `[${sourceIp}]` : sourceIp;
-      await state.recordPeerAddress(frame.sender, `${host}:${knownPort}`);
-    }
-  }
 
   return new Response("", { status: 202 });
 }

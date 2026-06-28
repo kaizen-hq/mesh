@@ -61,7 +61,7 @@ describe("PeerRegistry.create()", () => {
     expect(registry.get("bob")!.addresses).toContain("http://bob:7979");
   });
 
-  it("places cached addresses before static config addresses", async () => {
+  it("places static config addresses before cached addresses", async () => {
     const root = await makeTmpRoot();
     await fs.writeFile(
       path.join(root, "peer_addresses.toml"),
@@ -73,8 +73,8 @@ describe("PeerRegistry.create()", () => {
     });
     const registry = await PeerRegistry.create(root, config);
     const addrs = registry.get("bob")!.addresses;
-    expect(addrs[0]).toBe("http://bob-cached:7979");
-    expect(addrs).toContain("http://bob-static:7979");
+    expect(addrs[0]).toBe("http://bob-static:7979");
+    expect(addrs).toContain("http://bob-cached:7979");
   });
 
   it("does not duplicate addresses present in both cache and static config", async () => {
