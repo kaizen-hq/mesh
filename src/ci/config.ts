@@ -133,6 +133,18 @@ export async function loadPipeline(repoPath: string): Promise<Pipeline | null> {
   }
 }
 
+/** Load the pipeline config from a bare mirror repo via `git show`. */
+export async function loadPipelineFromMirror(mirrorDir: string): Promise<Pipeline | null> {
+  const proc = Bun.spawn(
+    ["git", "show", "HEAD:.mesh/mesh-ci.yml"],
+    { cwd: mirrorDir, stdout: "pipe", stderr: "pipe" },
+  );
+  const exit = await proc.exited;
+  if (exit !== 0) return null; // file absent or mirror empty
+  const src = await new Response(proc.stdout).text();
+  return parsePipeline(src);
+}
+
 // ---------- tool auto-detection ----------
 
 const KNOWN_TOOLS = ["docker", "bun", "node", "python3", "go", "cargo"];

@@ -16,7 +16,7 @@ export interface SchedulerCtx {
 import type { Pipeline, PipelineRun, TriggerKind, RunnerRequirements } from "./types.ts";
 import type { CiMessage } from "../proto.ts";
 import { signFrame } from "../proto.ts";
-import { loadPipeline } from "./config.ts";
+import { loadPipelineFromMirror } from "./config.ts";
 import * as repoStore from "../repo_store.ts";
 import { normalizePeerUrl } from "../config.ts";
 import { encodeFrame } from "../proto.ts";
@@ -120,21 +120,13 @@ export async function onManualRun(
 ): Promise<void> {
   console.log(`[ci] manual run requested: repo=${repo} ref=${ref} sha=${sha.slice(0, 7)}`);
 
-  const repoCfg = state.config.repos.find((r) => r.name === repo);
-  if (!repoCfg) {
-    console.log(`[ci] manual run aborted: repo ${repo} not found in config`);
-    return;
-  }
-
-  const repoAbsPath = path.isAbsolute(repoCfg.path)
-    ? repoCfg.path
-    : path.join(os.homedir(), repoCfg.path);
-  const pipeline = await loadPipeline(repoAbsPath).catch((e) => {
+  const mirrorDir = repoStore.mirrorPath(state.root, repo);
+  const pipeline = await loadPipelineFromMirror(mirrorDir).catch((e) => {
     console.log(`[ci] manual run aborted: failed to load pipeline for ${repo}: ${(e as Error).message}`);
     return null;
   });
   if (!pipeline) {
-    console.log(`[ci] manual run aborted: no .mesh/mesh-ci.yml found for ${repo}`);
+    console.log(`[ci] manual run aborted: no .mesh/mesh-ci.yml found in mirror for ${repo}`);
     return;
   }
   if (!pipeline.on.manual) {
@@ -182,22 +174,13 @@ export async function onRefUpdate(
 ): Promise<void> {
   console.log(`[ci] ref update: repo=${repo} ref=${ref} sha=${sha.slice(0, 7)}`);
 
-  // Find the repo path to load mesh-ci.yml
-  const repoCfg = state.config.repos.find((r) => r.name === repo);
-  if (!repoCfg) {
-    console.log(`[ci] push trigger aborted: repo ${repo} not found in config`);
-    return;
-  }
-
-  const repoAbsPath = path.isAbsolute(repoCfg.path)
-    ? repoCfg.path
-    : path.join(os.homedir(), repoCfg.path);
-  const pipeline = await loadPipeline(repoAbsPath).catch((e) => {
+  const mirrorDir = repoStore.mirrorPath(state.root, repo);
+  const pipeline = await loadPipelineFromMirror(mirrorDir).catch((e) => {
     console.log(`[ci] push trigger aborted: failed to load pipeline for ${repo}: ${(e as Error).message}`);
     return null;
   });
   if (!pipeline) {
-    console.log(`[ci] push trigger aborted: no .mesh/mesh-ci.yml found for ${repo}`);
+    console.log(`[ci] push trigger aborted: no .mesh/mesh-ci.yml found in mirror for ${repo}`);
     return;
   }
   if (!pipeline.on.push) {
@@ -298,24 +281,22 @@ function scheduleLocalRun(state: SchedulerCtx, pipeline: Pipeline, run: Pipeline
 async function runLocalPipeline(state: SchedulerCtx, pipeline: Pipeline, run: PipelineRun): Promise<void> {
   console.log(`[ci] starting local run ${run.run_id} for ${run.repo} @ ${run.ref}`);
   const { runPipeline } = await import("./engine.ts");
-  const repoCfg = state.config.repos.find((r) => r.name === run.repo);
-  if (!repoCfg) {
-    console.log(`[ci] local run ${run.run_id} aborted: repo ${run.repo} not found in config`);
-    return;
-  }
   const mirrorPath = repoStore.mirrorPath(state.root, run.repo);
 
-  // Ensure the mirror has commits before creating a worktree. The fetch loop
-  // runs every 60s, so on a fresh start the mirror may be empty. Fetch from
-  // the working copy now so the worktree has something to check out.
-  const workingCopyPath = path.isAbsolute(repoCfg.path)
-    ? repoCfg.path
-    : path.join(os.homedir(), repoCfg.path);
-  try {
-    await git.fetchIntoBare(mirrorPath, workingCopyPath);
-    console.log(`[ci] mirror refreshed for ${run.repo}`);
-  } catch (e) {
-    console.log(`[ci] mirror refresh for ${run.repo} failed (continuing): ${(e as Error).message}`);
+  // If this node owns the repo, pre-fetch from the working copy so the mirror
+  // is current before creating the worktree. Non-fatal: runner nodes won't have
+  // a local working copy and the mirror is kept fresh by the fetch loop.
+  const repoCfg = state.config.repos.find((r) => r.name === run.repo);
+  if (repoCfg) {
+    const workingCopyPath = path.isAbsolute(repoCfg.path)
+      ? repoCfg.path
+      : path.join(os.homedir(), repoCfg.path);
+    try {
+      await git.fetchIntoBare(mirrorPath, workingCopyPath);
+      console.log(`[ci] mirror refreshed for ${run.repo}`);
+    } catch (e) {
+      console.log(`[ci] mirror refresh for ${run.repo} failed (continuing): ${(e as Error).message}`);
+    }
   }
 
   const worktreePath = mirrorPath;
