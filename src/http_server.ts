@@ -325,24 +325,22 @@ async function handleFramePost(state: Daemon, req: Request, server: any): Promis
 
   await peerLink.handleInboundFrame(state, frame.sender, msg);
 
-  // After verifying the frame is genuinely from `frame.sender`, record their
-  // source IP so we can reach them if all cached addresses have gone stale
-  // (e.g. they moved to a different network).
-  const sourceIp: string | undefined = server?.requestIP?.(req)?.address;
-  if (sourceIp) {
-    const peerAddresses = state.peers.get(frame.sender)?.addresses ?? [];
-    // Re-use the port from their most recently known address, falling back to
-    // the default peer port.  The TCP source port is ephemeral; what we want
-    // is the port they're listening on.
-    const fallbackPort = String(state.config.self.peer_port);
-    const knownPort =
-      peerAddresses.length > 0
-        ? (peerAddresses[0]!.split(":").at(-1) ?? fallbackPort)
-        : fallbackPort;
-    // Bracket IPv6 addresses so the result is a valid host:port string.
-    const host = sourceIp.includes(":") ? `[${sourceIp}]` : sourceIp;
-    const discovered = `${host}:${knownPort}`;
-    await state.recordPeerAddress(frame.sender, discovered);
+  // Only auto-discover the source IP when the peer has no statically configured
+  // addresses in mesh.toml. If a hostname is configured, trust it — using the
+  // raw TCP source IP would overwrite it in peer_addresses.toml and take
+  // priority on the next connection attempt.
+  if (peerEntry.addresses.length === 0) {
+    const sourceIp: string | undefined = server?.requestIP?.(req)?.address;
+    if (sourceIp) {
+      // Re-use the port from their most recently known address, falling back to
+      // the default peer port.  The TCP source port is ephemeral; what we want
+      // is the port they're listening on.
+      const fallbackPort = String(state.config.self.peer_port);
+      const knownPort = state.peers.get(frame.sender)?.addresses[0]?.split(":").at(-1) ?? fallbackPort;
+      // Bracket IPv6 addresses so the result is a valid host:port string.
+      const host = sourceIp.includes(":") ? `[${sourceIp}]` : sourceIp;
+      await state.recordPeerAddress(frame.sender, `${host}:${knownPort}`);
+    }
   }
 
   return new Response("", { status: 202 });
@@ -443,7 +441,12 @@ async function handleCiManualRun(state: Daemon, req: Request, repo: string): Pro
   const ref = (form.get("ref") ?? "").toString().trim();
   if (!ref) return textResponse(400, "ref is required");
 
-  void scheduler.onRefUpdate(state, repo, ref, ref).catch(() => {});
+  // Resolve the ref to a real commit SHA from the local mirror.
+  const mirrorDir = repoStore.mirrorPath(state.root, repo);
+  const fullRef = ref.startsWith("refs/") ? ref : `refs/heads/${ref}`;
+  const sha = (await gitp.refSha(mirrorDir, fullRef)) ?? (await gitp.refSha(mirrorDir, ref)) ?? ref;
+
+  void scheduler.onManualRun(state, repo, fullRef, sha).catch(() => {});
   return new Response("", { status: 303, headers: { Location: `/repos/${encodeURIComponent(repo)}/ci` } });
 }
 

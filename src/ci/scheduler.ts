@@ -13,7 +13,7 @@ export interface SchedulerCtx {
   peers: PeerRegistry;
   notifyCiRunChanged(repo: string): void;
 }
-import type { Pipeline, PipelineRun, TriggerKind, NodeCapabilities, RunnerRequirements } from "./types.ts";
+import type { Pipeline, PipelineRun, TriggerKind, RunnerRequirements } from "./types.ts";
 import type { CiMessage } from "../proto.ts";
 import { signFrame } from "../proto.ts";
 import { loadPipeline } from "./config.ts";
@@ -108,6 +108,49 @@ function peerCapabilities(state: SchedulerCtx): PeerCapabilityEntry[] {
     });
   }
   return entries;
+}
+
+// ---------- manual run hook ----------
+
+export async function onManualRun(
+  state: SchedulerCtx,
+  repo: string,
+  ref: string,
+  sha: string,
+): Promise<void> {
+  const repoCfg = state.config.repos.find((r) => r.name === repo);
+  if (!repoCfg) return;
+
+  const repoAbsPath = path.isAbsolute(repoCfg.path)
+    ? repoCfg.path
+    : path.join(os.homedir(), repoCfg.path);
+  const pipeline = await loadPipeline(repoAbsPath).catch(() => null);
+  if (!pipeline) return;
+  if (!pipeline.on.manual) return;
+
+  const runId = crypto.randomUUID();
+  const trigger: TriggerKind = { type: "manual", initiator: state.config.self.name };
+
+  const run: PipelineRun = {
+    run_id: runId,
+    repo,
+    ref,
+    sha,
+    triggered_by: trigger,
+    runner: state.config.self.name,
+    status: "pending",
+    started_at: new Date().toISOString(),
+    jobs: {},
+  };
+
+  const candidates = peerCapabilities(state);
+  const selectedPeer = selectRunner(candidates, pipeline.runner);
+
+  if (selectedPeer) {
+    await sendAssignment(state, selectedPeer, run, pipeline, trigger);
+  } else {
+    scheduleLocalRun(state, pipeline, run);
+  }
 }
 
 // ---------- ref update hook ----------
