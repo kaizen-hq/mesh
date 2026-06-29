@@ -18,8 +18,7 @@ import * as repoStore from "./repo_store.ts";
 import * as serveInstall from "./serve_install.ts";
 import { buildZip, meshRoot, isCompiledBinary } from "./package_source.ts";
 import { runUpdate } from "./update.ts";
-import { runAddRepos } from "./add_repos.ts";
-import { loadSecretsConfig, detectTools } from "./ci/config.ts";
+import { loadSecretsConfig, detectTools, loadPipelineFromMirror } from "./ci/config.ts";
 import { checkCronSlots, type CronJobSpec } from "./ci/cron.ts";
 import pkg from "../package.json" with { type: "json" };
 
@@ -49,8 +48,6 @@ const USAGE_TAIL = `  start [flags]                     Run the foreground serve
   reset-repo <name>                 hard-reset a mirror
   add-address <peer> <addr>         bootstrap a peer's address
   add-peer <name> <pubkey> [addr]   add a peer to mesh.toml
-  add-repo <name> <path> [--branch B ...]  add a contributed repo to mesh.toml
-  add-repos <parent-dir>            scan dir for git working copies, append to mesh.toml
   invite [--addr HOST:PORT] [--ttl SECS]   print a pairing token for a teammate
   join <token>                      accept a teammate's pairing token
   update [--from PEER] [--ref TAG] [--force]  update to the latest release
@@ -202,26 +199,8 @@ async function main() {
         }
         return await sendAndPrint(root, { type: "add_peer", name, pubkey, address });
       }
-      case "add-repo": {
-        const name = args.positional[0];
-        const repoPath = args.positional[1];
-        if (!name || !repoPath) {
-          console.error("usage: mesh add-repo <name> <path>");
-          process.exit(1);
-        }
-        return await sendAndPrint(root, {
-          type: "add_repo",
-          name,
-          path: repoPath,
-        });
-      }
-      case "add-repos": {
-        const parentDir = args.positional[0];
-        if (!parentDir) {
-          console.error("usage: mesh add-repos <parent-dir>");
-          process.exit(1);
-        }
-        return await runAddRepos(root, parentDir);
+      case "repos": {
+        return await sendAndPrint(root, { type: "list_repos" });
       }
       case "invite": {
         const ttlSecs = Number(args.flags["ttl"] ?? 600);
@@ -303,10 +282,14 @@ async function cmdStart(root: string, args: Args) {
   const cfg = await loadConfig(path.join(root, "mesh.toml"));
   if (args.flags["peer-tls"]) cfg.transport.tls = true;
   console.log(
-    `loaded config: self=${cfg.self.name} peers=${cfg.peers.length} repos=${cfg.repos.length} tls=${cfg.transport.tls}`,
+    `loaded config: self=${cfg.self.name} peers=${cfg.peers.length} tls=${cfg.transport.tls}`,
   );
 
   const state = await Daemon.create(root, cfg, id);
+
+  // Pre-populate registry from any mirrors that already exist on disk.
+  const existingMirrors = await repoStore.scanMirrors(root);
+  for (const name of existingMirrors) state.repos.ensure(name);
   await repoStore.ensureMirrors(state);
 
   // Load secrets and detect capabilities from runner config in mesh.toml
@@ -428,7 +411,8 @@ function printRepos(repos: unknown[]) {
   console.log("repos:");
   for (const r of repos as Array<{
     name: string;
-    contributed: boolean;
+    introduced_by: string | null;
+    introduced_at: string | null;
     sources: string[];
     local_head: string | null;
     last_fetch_secs: number | null;
@@ -436,11 +420,11 @@ function printRepos(repos: unknown[]) {
   }>) {
     const head = r.local_head ?? "(empty)";
     const lf = r.last_fetch_secs == null ? "never" : `${r.last_fetch_secs}s ago`;
-    const kind = r.contributed ? "ours" : "mirror";
+    const by = r.introduced_by ? `introduced_by=${r.introduced_by}` : "";
     const sources = r.sources.length > 0 ? r.sources.join(",") : "(no sources)";
     const divTag = r.divergences.length > 0 ? ` divergent=${r.divergences.length}` : "";
     console.log(
-      `  ${r.name.padEnd(24)} ${kind.padEnd(6)} head=${head.slice(0, 10).padEnd(10)} last_fetch=${lf.padEnd(10)} sources=${sources}${divTag}`,
+      `  ${r.name.padEnd(24)} head=${head.slice(0, 10).padEnd(10)} last_fetch=${lf.padEnd(10)} sources=${sources} ${by}${divTag}`,
     );
     for (const d of r.divergences) {
       console.log(`      ! diverged: ${d.peer}/${d.branch} -> ${d.their_sha.slice(0, 10)} (${d.replica_ref})`);
@@ -517,17 +501,20 @@ async function cmdCi(root: string, args: Args): Promise<void> {
 }
 
 async function runCronLoop(state: Daemon, intervalSecs: number): Promise<void> {
-  const { loadPipeline } = await import("./ci/config.ts");
+  // Only nodes with runner enabled participate in cron elections.
+  if (!state.config.runner.enabled) return;
+
   while (true) {
     await new Promise((r) => setTimeout(r, Math.max(1, intervalSecs) * 1000));
     const now = new Date();
     const specs: CronJobSpec[] = [];
-    for (const repo of state.config.repos) {
+    for (const [name] of state.repos.entries()) {
       try {
-        const pipeline = await loadPipeline(repo.path);
+        const mirrorDir = repoStore.mirrorPath(state.root, name);
+        const pipeline = await loadPipelineFromMirror(mirrorDir);
         if (!pipeline?.on.schedule) continue;
         for (const s of pipeline.on.schedule) {
-          specs.push({ repo: repo.name, job: s.job, cron: s.cron });
+          specs.push({ repo: name, job: s.job, cron: s.cron });
         }
       } catch { /* skip repos without CI config */ }
     }

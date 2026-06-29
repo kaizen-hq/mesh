@@ -17,7 +17,6 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
   return {
     self: { name: "alice", peer_port: 7979 },
     peers: [],
-    repos: [],
     transport: { tls: false, poll_secs: 10 },
     runner: DEFAULT_RUNNER,
     raw_hash: "abc123",
@@ -75,12 +74,9 @@ describe("Daemon.create()", () => {
     expect(daemon.peers.has("bob")).toBe(true);
   });
 
-  it("initializes repos from config", async () => {
-    const config = makeConfig({
-      repos: [{ name: "myrepo", path: "/tmp/r" }],
-    });
-    const daemon = await Daemon.create(await makeTmpRoot(), config, makeIdentity());
-    expect(daemon.repos.has("myrepo")).toBe(true);
+  it("starts with an empty repo registry (repos discovered via push)", async () => {
+    const daemon = await Daemon.create(await makeTmpRoot(), makeConfig(), makeIdentity());
+    expect([...daemon.repos.keys()]).toHaveLength(0);
   });
 
   it("sets root, config, and identity", async () => {

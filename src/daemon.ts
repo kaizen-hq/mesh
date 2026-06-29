@@ -53,7 +53,7 @@ export class Daemon {
 
   static async create(root: string, config: Config, identity: Identity): Promise<Daemon> {
     const peers = await PeerRegistry.create(root, config);
-    const repos = RepoRegistry.create(config);
+    const repos = RepoRegistry.create();
     const daemon = new Daemon(root, config, identity, peers, repos);
     daemon.pendingInvites = await loadPendingInvites(root);
     return daemon;

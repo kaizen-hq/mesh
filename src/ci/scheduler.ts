@@ -23,8 +23,6 @@ import { saveRun } from "./store.ts";
 import * as repoStore from "../repo_store.ts";
 import { normalizePeerUrl } from "../config.ts";
 import { encodeFrame } from "../proto.ts";
-import * as os from "node:os";
-import * as path from "node:path";
 import * as git from "../git.ts";
 
 // ---------- pure runner-selection types ----------
@@ -318,22 +316,6 @@ async function runLocalPipeline(state: SchedulerCtx, pipeline: Pipeline, run: Pi
   console.log(`[ci] starting local run ${run.run_id} for ${run.repo} @ ${run.ref}`);
   const { runPipeline } = await import("./engine.ts");
   const mirrorPath = repoStore.mirrorPath(state.root, run.repo);
-
-  // If this node owns the repo, pre-fetch from the working copy so the mirror
-  // is current before creating the worktree. Non-fatal: runner nodes won't have
-  // a local working copy and the mirror is kept fresh by the fetch loop.
-  const repoCfg = state.config.repos.find((r) => r.name === run.repo);
-  if (repoCfg) {
-    const workingCopyPath = path.isAbsolute(repoCfg.path)
-      ? repoCfg.path
-      : path.join(os.homedir(), repoCfg.path);
-    try {
-      await git.fetchIntoBare(mirrorPath, workingCopyPath);
-      console.log(`[ci] mirror refreshed for ${run.repo}`);
-    } catch (e) {
-      console.log(`[ci] mirror refresh for ${run.repo} failed (continuing): ${(e as Error).message}`);
-    }
-  }
 
   // The local working copy may lag a force-push. If the assigned SHA isn't
   // present in the mirror yet, try reconciling from peers that are online.

@@ -5,7 +5,6 @@
 
 import * as path from "node:path";
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import type { Daemon } from "./daemon.ts";
 import * as repoStore from "./repo_store.ts";
 import * as gitp from "./git.ts";
@@ -35,7 +34,15 @@ import type { IssueEvent } from "./proto.ts";
 import * as ciHttp from "./ci/http.ts";
 import { loadRun, listRuns, readLog, tailLog } from "./ci/store.ts";
 import * as scheduler from "./ci/scheduler.ts";
-import { loadPipeline } from "./ci/config.ts";
+import { loadPipelineFromMirror } from "./ci/config.ts";
+
+// ---------- repo name validation ----------
+
+const REPO_NAME_RE = /^[a-zA-Z0-9._-]+$/;
+
+function isValidRepoName(name: string): boolean {
+  return REPO_NAME_RE.test(name) && name !== ".." && !name.includes("..");
+}
 
 // ---------- security helpers ----------
 
@@ -373,11 +380,8 @@ async function handleCiPipelinesTab(state: Daemon, views: Views, req: Request, r
   const page = parsePage(url.searchParams.get("page"));
   const size = parseSize(url.searchParams.get("size"));
 
-  const repoCfg = state.config.repos.find((r) => r.name === repo);
-  const repoAbsPath = repoCfg
-    ? (path.isAbsolute(repoCfg.path) ? repoCfg.path : path.join(os.homedir(), repoCfg.path))
-    : null;
-  const pipeline = repoAbsPath ? await loadPipeline(repoAbsPath).catch(() => null) : null;
+  const mirrorDir = repoStore.mirrorPath(state.root, repo);
+  const pipeline = await loadPipelineFromMirror(mirrorDir).catch(() => null);
 
   // Merge in-memory runs (current session) with persisted runs from disk so the
   // list survives daemon restarts and is visible on peers that don't have the
@@ -547,11 +551,26 @@ async function handleGit(state: Daemon, req: Request, url: URL, server: any): Pr
     }
   }
 
+  if (!isValidRepoName(parsed.repo)) {
+    return textResponse(400, "invalid repo name");
+  }
+
   const dir = repoStore.mirrorPath(state.root, parsed.repo);
-  try {
-    await fs.access(dir);
-  } catch {
-    return textResponse(404, "repo not in local mirror store");
+  const mirrorExists = await Bun.file(path.join(dir, "HEAD")).exists();
+  if (!mirrorExists) {
+    if (service !== "git-receive-pack") {
+      return textResponse(404, "repo not found");
+    }
+    // First push — auto-create the bare mirror and record provenance.
+    try {
+      await gitp.initBare(dir);
+    } catch (e) {
+      return textResponse(500, `failed to init repo: ${(e as Error).message}`);
+    }
+    await repoStore.saveRepoMeta(state.root, parsed.repo, {
+      introduced_by: state.config.self.name,
+      introduced_at: new Date().toISOString(),
+    });
   }
 
   if (op === "info") {

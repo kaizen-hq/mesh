@@ -1,10 +1,10 @@
-// Bare repo mirrors at ~/.mesh/repos/<name>.git. Mirror of src/repo_store.rs.
+// Bare repo mirrors at ~/.mesh/repos/<name>.git.
 
 import * as os from "node:os";
 import * as path from "node:path";
 import * as fs from "node:fs/promises";
 import type { Divergence, RepoRegistry } from "./repo_registry.ts";
-import { findRepo, normalizePeerUrl, type Config } from "./config.ts";
+import { normalizePeerUrl, type Config } from "./config.ts";
 import type { RepoStatus, BranchStatus } from "./proto.ts";
 import type { PeerRegistry } from "./peer_registry.ts";
 import * as git from "./git.ts";
@@ -16,45 +16,77 @@ export interface RepoStoreCtx {
   peers: PeerRegistry;
 }
 
+// ---------- paths ----------
+
 export function mirrorPath(root: string, repo: string): string {
   return path.join(root, "repos", `${repo}.git`);
 }
 
-export async function ensureMirrors(state: RepoStoreCtx): Promise<void> {
-  for (const r of state.config.repos) {
-    const dir = mirrorPath(state.root, r.name);
-    await git.initBare(dir);
-    state.repos.ensure(r.name);
+function metaPath(root: string, repo: string): string {
+  return path.join(root, "repos", `${repo}.meta.json`);
+}
+
+// ---------- repo metadata ----------
+
+export interface RepoMeta {
+  introduced_by: string;
+  introduced_at: string;
+}
+
+export async function loadRepoMeta(root: string, repo: string): Promise<RepoMeta | null> {
+  try {
+    const raw = await fs.readFile(metaPath(root, repo), "utf8");
+    return JSON.parse(raw) as RepoMeta;
+  } catch {
+    return null;
   }
+}
+
+export async function saveRepoMeta(root: string, repo: string, meta: RepoMeta): Promise<void> {
+  const file = metaPath(root, repo);
+  const tmp = file + ".tmp";
+  await fs.writeFile(tmp, JSON.stringify(meta), "utf8");
+  await fs.rename(tmp, file);
+}
+
+// ---------- startup scan ----------
+
+/** Scan ~/.mesh/repos/ and return the names of all existing bare mirrors. */
+export async function scanMirrors(root: string): Promise<string[]> {
+  const dir = path.join(root, "repos");
+  let entries: Awaited<ReturnType<typeof fs.readdir<{ withFileTypes: true }>>>;
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const names: string[] = [];
+  for (const e of entries) {
+    if (e.isDirectory() && e.name.endsWith(".git")) {
+      names.push(e.name.slice(0, -4));
+    }
+  }
+  return names;
+}
+
+// ---------- mirror lifecycle ----------
+
+export async function ensureMirrors(state: RepoStoreCtx): Promise<void> {
+  // Init bare mirrors for all repos already in the registry (discovered from
+  // peers or pre-populated by scanMirrors at startup). Does not consult config.
   for (const name of state.repos.keys()) {
     const dir = mirrorPath(state.root, name);
     await git.initBare(dir);
   }
 }
 
+// ---------- sync ----------
+
 export async function fetchAll(state: RepoStoreCtx): Promise<void> {
-  const home = os.homedir();
   const me = state.config.self.name;
 
-  // 1) Contributed repos: fetch from working copy.
-  for (const r of state.config.repos) {
-    const dir = mirrorPath(state.root, r.name);
-    const src = path.join(home, r.path);
-    const present = (await exists(path.join(src, ".git"))) || (await exists(path.join(src, "HEAD")));
-    if (!present) {
-      continue;
-    }
-    try {
-      await git.fetchIntoBare(dir, src);
-      await markFresh(state, r.name, dir);
-    } catch (e) {
-      console.warn(`fetch from working copy ${src} failed:`, (e as Error).message);
-    }
-  }
-
-  // 2) Discovered repos: fetch from any reachable advertising peer.
+  // Fetch all known repos from any reachable peer that advertises them.
   for (const [name, local] of state.repos.entries()) {
-    if (findRepo(state.config, name)) continue;
     const dir = mirrorPath(state.root, name);
     if (!(await exists(dir))) {
       try {
@@ -95,6 +127,8 @@ async function markFresh(state: RepoStoreCtx, name: string, dir: string): Promis
   const head = await git.headSha(dir);
   if (head) local.lastHead = head;
 }
+
+// ---------- reconcile from peer ----------
 
 export interface ReconcileOutcome {
   advanced: string[];
@@ -177,14 +211,16 @@ export async function reconcileFromPeer(
   return { advanced, divergent };
 }
 
+// ---------- repo status for heartbeat ----------
+
 export async function repoStatuses(state: RepoStoreCtx): Promise<RepoStatus[]> {
   const out: RepoStatus[] = [];
-  for (const r of state.config.repos) {
-    const dir = mirrorPath(state.root, r.name);
+  for (const [name] of state.repos.entries()) {
+    const dir = mirrorPath(state.root, name);
     const head_sha = (await git.headSha(dir)) ?? null;
     const branchPairs = await git.branchHeads(dir);
     const branches: BranchStatus[] = branchPairs.map(([n, s]) => ({ name: n, sha: s }));
-    out.push({ name: r.name, head_sha, branches });
+    out.push({ name, head_sha, branches });
   }
   return out;
 }
@@ -196,6 +232,8 @@ export async function resetRepo(state: RepoStoreCtx, name: string): Promise<void
   }
   await git.initBare(dir);
 }
+
+// ---------- ref snapshot diff ----------
 
 // Diff two `refs/heads/*` snapshots so we can build a RefUpdate gossip frame
 // after a successful receive-pack.
@@ -225,6 +263,8 @@ export function diffRefSnapshots(
   return changes;
 }
 
+// ---------- fetch loop ----------
+
 async function exists(p: string): Promise<boolean> {
   try {
     await fs.stat(p);
@@ -236,7 +276,6 @@ async function exists(p: string): Promise<boolean> {
 
 export async function runFetchLoop(state: RepoStoreCtx, secs: number): Promise<void> {
   const interval = Math.max(5, secs) * 1000;
-  // initial pass immediately
   while (true) {
     try {
       await fetchAll(state);

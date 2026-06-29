@@ -173,8 +173,20 @@ async function handleInboundRefUpdate(
   repo: string,
   _refs: RefChange[],
 ): Promise<void> {
+  const isNew = !state.repos.has(repo);
   const local = state.repos.ensure(repo);
   local.noteSource(sender);
+
+  // Persist introduced_by metadata the first time we hear about a repo.
+  if (isNew) {
+    const existing = await repoStore.loadRepoMeta(state.root, repo);
+    if (!existing) {
+      await repoStore.saveRepoMeta(state.root, repo, {
+        introduced_by: sender,
+        introduced_at: new Date().toISOString(),
+      });
+    }
+  }
 
   let outcome;
   try {
@@ -242,8 +254,6 @@ function scheduleReconcileIfStale(
         }
       }
       if (!stale) continue;
-      // Skip repos we contribute ourselves — our working copy wins.
-      if (state.config.repos.some((cr) => cr.name === r.name)) continue;
       try {
         await repoStore.reconcileFromPeer(state, peer, r.name);
       } catch (e) {

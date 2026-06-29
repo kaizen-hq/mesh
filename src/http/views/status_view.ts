@@ -38,23 +38,18 @@ export function renderStatusData(ctx: StatusViewCtx): string {
   }
   if (!peerRows) peerRows = `<tr><td colspan="5"><em>(no peers configured)</em></td></tr>`;
 
-  const contributed = new Set(cfg.repos.map((r) => r.name));
-  const allNames = new Set<string>([...contributed]);
-  for (const k of repos.keys()) allNames.add(k);
-
   let repoRows = "";
-  for (const name of [...allNames].sort()) {
+  for (const name of [...repos.keys()].sort()) {
     const local = repos.get(name);
     const head = local?.lastHead?.slice(0, 10) ?? "(empty)";
     const lf = local?.lastFetch ? `${Math.floor((now - local.lastFetch) / 1000)}s ago` : "never";
     const sources = local?.sourceList().join(",") ?? "";
-    const kind = contributed.has(name) ? "ours" : "mirror";
     const divCount = local?.divergenceList().length ?? 0;
     const divCell = divCount > 0 ? `<span class="down">${divCount}</span>` : "0";
     const lastBuild = latestRunBadge(ci, name, now);
-    repoRows += `<tr><td><a href="/repos/${esc(name)}">${esc(name)}</a></td><td>${kind}</td><td><code>${esc(head)}</code></td><td>${esc(lf)}</td><td>${esc(sources)}</td><td>${divCell}</td><td>${lastBuild}</td></tr>`;
+    repoRows += `<tr><td><a href="/repos/${esc(name)}">${esc(name)}</a></td><td><code>${esc(head)}</code></td><td>${esc(lf)}</td><td>${esc(sources)}</td><td>${divCell}</td><td>${lastBuild}</td></tr>`;
   }
-  if (!repoRows) repoRows = `<tr><td colspan="7"><em>(no repos)</em></td></tr>`;
+  if (!repoRows) repoRows = `<tr><td colspan="6"><em>(no repos — push to https://localhost:7979/&lt;repo&gt;.git to get started)</em></td></tr>`;
 
   return `<div id="status-data">
 <h2>peers</h2>
@@ -64,7 +59,7 @@ export function renderStatusData(ctx: StatusViewCtx): string {
 </table>
 <h2>repos</h2>
 <table>
-  <thead><tr><th>name</th><th>kind</th><th>head</th><th>last reconcile</th><th>sources</th><th>divergent</th><th>last build</th></tr></thead>
+  <thead><tr><th>name</th><th>head</th><th>last reconcile</th><th>sources</th><th>divergent</th><th>last build</th></tr></thead>
   <tbody>${repoRows}</tbody>
 </table>
 </div>`;
