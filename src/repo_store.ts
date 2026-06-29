@@ -96,7 +96,6 @@ export async function fetchAll(state: RepoStoreCtx): Promise<void> {
         continue;
       }
     }
-    let fetched = false;
     for (const source of local.sourceList()) {
       if (source === me) continue;
       const peer = state.peers.get(source);
@@ -109,14 +108,10 @@ export async function fetchAll(state: RepoStoreCtx): Promise<void> {
           );
         }
         await markFresh(state, name, dir);
-        fetched = true;
         break;
       } catch (e) {
         console.debug(`reconcile ${name} from ${source} failed:`, (e as Error).message);
       }
-    }
-    if (!fetched) {
-      console.debug(`no reachable source for ${name}`);
     }
   }
 }
