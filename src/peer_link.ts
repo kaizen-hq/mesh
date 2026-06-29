@@ -209,7 +209,7 @@ async function handleInboundRefUpdate(
       }
     }
     if (changes.length > 0) {
-      broadcastRefUpdate(state, repo, changes, sender);
+      broadcastRefUpdate(state, repo, changes, sender, false);
     }
   }
   for (const d of outcome.divergent) {
@@ -436,13 +436,18 @@ export function broadcastRefUpdate(
   repo: string,
   refs: Array<{ name: string; old_sha: string; new_sha: string }>,
   skip: string | null,
+  triggerCi = true,
 ): void {
   if (refs.length === 0) return;
-  // Trigger CI scheduling for each ref change
-  for (const ref of refs) {
-    void scheduler.onRefUpdate(state, repo, ref.name, ref.new_sha).catch((e) => {
-      console.debug(`CI onRefUpdate failed (repo=${repo} ref=${ref.name}):`, (e as Error).message);
-    });
+  // Only trigger CI on the node that received the git push directly.
+  // Relay calls (from handleInboundRefUpdate) pass triggerCi=false so that
+  // every node in the mesh doesn't independently schedule the same run.
+  if (triggerCi) {
+    for (const ref of refs) {
+      void scheduler.onRefUpdate(state, repo, ref.name, ref.new_sha).catch((e) => {
+        console.debug(`CI onRefUpdate failed (repo=${repo} ref=${ref.name}):`, (e as Error).message);
+      });
+    }
   }
   void (async () => {
     const me = state.config.self.name;
