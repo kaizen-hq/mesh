@@ -120,6 +120,15 @@ export async function fetchIntoBare(dir: string, src: string): Promise<void> {
   }
 }
 
+export async function shaExists(dir: string, sha: string): Promise<boolean> {
+  const proc = Bun.spawn(["git", "cat-file", "-e", `${sha}^{commit}`], {
+    cwd: dir,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  return (await proc.exited) === 0;
+}
+
 export async function headSha(dir: string): Promise<string | null> {
   const proc = Bun.spawn(["git", "rev-parse", "HEAD"], {
     cwd: dir,

@@ -3,6 +3,7 @@
 import type { Config } from "../config.ts";
 import type { CiDomain } from "./ci_domain.ts";
 import type { PeerRegistry } from "../peer_registry.ts";
+import type { RepoRegistry } from "../repo_registry.ts";
 import type { Identity } from "../identity.ts";
 
 export interface SchedulerCtx {
@@ -11,6 +12,7 @@ export interface SchedulerCtx {
   identity: Identity;
   ci: CiDomain;
   peers: PeerRegistry;
+  repos: RepoRegistry;
   notifyCiRunChanged(repo: string): void;
 }
 import type { Pipeline, PipelineRun, TriggerKind, RunnerRequirements } from "./types.ts";
@@ -272,6 +274,29 @@ async function sendAssignment(
   console.log(`[ci] assignment ${run.run_id} could not be delivered to ${peer} (all addresses failed)`);
 }
 
+// Exported for testing. Checks if `sha` is present in `mirrorPath`; if not,
+// iterates `peers` calling `reconcile(peer)` until the SHA is found.
+export async function resolveShaviaIPeers(
+  mirrorPath: string,
+  sha: string,
+  peers: IterableIterator<[string, unknown]>,
+  reconcile: (peer: string) => Promise<unknown>,
+): Promise<void> {
+  if (await git.shaExists(mirrorPath, sha)) return;
+  console.log(`[ci] SHA ${sha} not in mirror, fetching from peers`);
+  for (const [peer] of peers) {
+    try {
+      await reconcile(peer);
+      if (await git.shaExists(mirrorPath, sha)) {
+        console.log(`[ci] SHA ${sha} resolved via peer ${peer}`);
+        return;
+      }
+    } catch {
+      // peer unreachable or fetch failed; try next
+    }
+  }
+}
+
 function scheduleLocalRun(state: SchedulerCtx, pipeline: Pipeline, run: PipelineRun): void {
   state.ci.setRun(run);
   state.notifyCiRunChanged(run.repo);
@@ -298,6 +323,12 @@ async function runLocalPipeline(state: SchedulerCtx, pipeline: Pipeline, run: Pi
       console.log(`[ci] mirror refresh for ${run.repo} failed (continuing): ${(e as Error).message}`);
     }
   }
+
+  // The local working copy may lag a force-push. If the assigned SHA isn't
+  // present in the mirror yet, try reconciling from peers that are online.
+  await resolveShaviaIPeers(mirrorPath, run.sha, state.peers.entries(), (peer) =>
+    repoStore.reconcileFromPeer(state, peer, run.repo),
+  );
 
   const worktreePath = mirrorPath;
 

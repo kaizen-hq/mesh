@@ -1,6 +1,10 @@
 import { describe, it, expect } from "bun:test";
-import { selectRunner, matchesBranch, type PeerCapabilityEntry } from "./scheduler.ts";
+import { selectRunner, matchesBranch, resolveShaviaIPeers, type PeerCapabilityEntry } from "./scheduler.ts";
 import type { RunnerRequirements } from "./types.ts";
+import * as os from "node:os";
+import * as path from "node:path";
+import * as fs from "node:fs/promises";
+import { $ } from "bun";
 
 function makePeer(
   name: string,
@@ -120,5 +124,116 @@ describe("matchesBranch", () => {
 
   it("handles double-star glob", () => {
     expect(matchesBranch("refs/heads/feat/a/b", ["feat/**"])).toBe(true);
+  });
+});
+
+// ---------- helpers for resolveShaviaIPeers tests ----------
+
+const ALL_HEADS = "+refs/heads/*:refs/heads/*";
+
+/** Non-bare repo with one commit — used as the "peer" source in fetches. */
+async function makeSourceRepo(): Promise<{ dir: string; sha: string }> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "mesh-src-"));
+  await $`git -C ${dir} init -b main`.quiet();
+  await $`git -C ${dir} config user.email ci@test`.quiet();
+  await $`git -C ${dir} config user.name CI`.quiet();
+  await $`git -C ${dir} commit --allow-empty -m init`.quiet();
+  const sha = (await $`git -C ${dir} rev-parse HEAD`.quiet()).stdout.toString().trim();
+  return { dir, sha };
+}
+
+/** Empty bare repo — used as the CI mirror. */
+async function makeBareMirror(): Promise<string> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "mesh-mirror-"));
+  await $`git -C ${dir} init --bare`.quiet();
+  return dir;
+}
+
+/** Fetch all heads from srcDir into mirrorDir (refspec passed as variable to avoid glob expansion). */
+async function fetchIntoMirror(mirrorDir: string, srcDir: string): Promise<void> {
+  await $`git -C ${mirrorDir} fetch ${srcDir} ${ALL_HEADS}`.quiet();
+}
+
+function peersIter(names: string[]): IterableIterator<[string, unknown]> {
+  return names.map((n): [string, unknown] => [n, {}]).values();
+}
+
+describe("resolveShaviaIPeers", () => {
+  it("does nothing when SHA already exists in mirror", async () => {
+    const src = await makeSourceRepo();
+    const mirror = await makeBareMirror();
+    try {
+      // Pre-populate mirror so the SHA is already present.
+      await fetchIntoMirror(mirror, src.dir);
+      const reconcileCalls: string[] = [];
+      await resolveShaviaIPeers(mirror, src.sha, peersIter(["alice"]), async (peer) => {
+        reconcileCalls.push(peer);
+      });
+      expect(reconcileCalls).toHaveLength(0);
+    } finally {
+      await fs.rm(src.dir, { recursive: true, force: true });
+      await fs.rm(mirror, { recursive: true, force: true });
+    }
+  });
+
+  it("calls reconcile until SHA appears (simulates stale mirror after force-push)", async () => {
+    // src has the new SHA; mirror starts empty (stale working-copy fetch left it behind).
+    const src = await makeSourceRepo();
+    const mirror = await makeBareMirror();
+    try {
+      const reconcileCalls: string[] = [];
+
+      await resolveShaviaIPeers(mirror, src.sha, peersIter(["alice"]), async (peer) => {
+        reconcileCalls.push(peer);
+        // Simulate what reconcileFromPeer does: fetch from the peer source into the mirror.
+        await fetchIntoMirror(mirror, src.dir);
+      });
+
+      expect(reconcileCalls).toEqual(["alice"]);
+      const check = await $`git -C ${mirror} cat-file -e ${src.sha}`.nothrow().quiet();
+      expect(check.exitCode).toBe(0);
+    } finally {
+      await fs.rm(src.dir, { recursive: true, force: true });
+      await fs.rm(mirror, { recursive: true, force: true });
+    }
+  });
+
+  it("skips failing peers and tries the next one", async () => {
+    const src = await makeSourceRepo();
+    const mirror = await makeBareMirror();
+    try {
+      const reconcileCalls: string[] = [];
+
+      await resolveShaviaIPeers(mirror, src.sha, peersIter(["unreachable", "bob"]), async (peer) => {
+        reconcileCalls.push(peer);
+        if (peer === "unreachable") throw new Error("connection refused");
+        await fetchIntoMirror(mirror, src.dir);
+      });
+
+      expect(reconcileCalls).toEqual(["unreachable", "bob"]);
+      const check = await $`git -C ${mirror} cat-file -e ${src.sha}`.nothrow().quiet();
+      expect(check.exitCode).toBe(0);
+    } finally {
+      await fs.rm(src.dir, { recursive: true, force: true });
+      await fs.rm(mirror, { recursive: true, force: true });
+    }
+  });
+
+  it("stops after first successful reconcile even when more peers exist", async () => {
+    const src = await makeSourceRepo();
+    const mirror = await makeBareMirror();
+    try {
+      const reconcileCalls: string[] = [];
+
+      await resolveShaviaIPeers(mirror, src.sha, peersIter(["alice", "bob"]), async (peer) => {
+        reconcileCalls.push(peer);
+        await fetchIntoMirror(mirror, src.dir);
+      });
+
+      expect(reconcileCalls).toEqual(["alice"]); // stopped after alice succeeded
+    } finally {
+      await fs.rm(src.dir, { recursive: true, force: true });
+      await fs.rm(mirror, { recursive: true, force: true });
+    }
   });
 });
