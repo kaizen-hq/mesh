@@ -1,7 +1,7 @@
 // Bare repo mirrors at ~/.mesh/repos/<name>.git.
 
-import * as os from "node:os";
 import * as path from "node:path";
+import { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import type { Divergence, RepoRegistry } from "./repo_registry.ts";
 import { normalizePeerUrl, type Config } from "./config.ts";
@@ -54,7 +54,7 @@ export async function saveRepoMeta(root: string, repo: string, meta: RepoMeta): 
 /** Scan ~/.mesh/repos/ and return the names of all existing bare mirrors. */
 export async function scanMirrors(root: string): Promise<string[]> {
   const dir = path.join(root, "repos");
-  let entries: Awaited<ReturnType<typeof fs.readdir<{ withFileTypes: true }>>>;
+  let entries: Dirent[];
   try {
     entries = await fs.readdir(dir, { withFileTypes: true });
   } catch {

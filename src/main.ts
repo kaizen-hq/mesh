@@ -34,6 +34,7 @@ Commands:
   init                              Generate identity + seed mesh.toml
   pubkey                            Print our ed25519 pubkey
   url <repo>                        Print canonical local URL for a repo
+  ssl                               Trust the local node's TLS cert in git
   serve-install [--listen ADDR]     Serve source zip to teammates over HTTP
 `;
 
@@ -134,6 +135,8 @@ async function main() {
         return await cmdPubkey(root);
       case "url":
         return cmdUrl(args.positional[0]);
+      case "ssl":
+        return await cmdSsl(root);
       case "serve-install":
         return await serveInstall.run((args.flags["listen"] as string) || "0.0.0.0:8001", root);
       case "package": {
@@ -263,6 +266,16 @@ async function cmdPubkey(root: string) {
   await ensureDirs(root);
   const id = await loadOrCreate(root);
   console.log(id.pubkeyString);
+}
+
+async function cmdSsl(root: string) {
+  const { $ } = await import("bun");
+  const cfgPath = path.join(root, "mesh.toml");
+  const cfg = await loadConfig(cfgPath).catch(() => null);
+  const port = cfg?.self.peer_port ?? 7979;
+  const key = `http.https://localhost:${port}.sslVerify`;
+  await $`git config --global ${key} false`;
+  console.log(`set ${key} = false`);
 }
 
 function cmdUrl(repo: string | undefined) {
