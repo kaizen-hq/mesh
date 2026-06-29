@@ -58,10 +58,10 @@ function globMatch(str: string, pattern: string): boolean {
 
 // ---------- runner selection algorithm ----------
 
-export function selectRunner(
+export function rankRunners(
   peers: PeerCapabilityEntry[],
   req: RunnerRequirements,
-): string | null {
+): string[] {
   const hasLabels = (p: PeerCapabilityEntry) =>
     req.labels.every((l) => p.labels.includes(l));
   const hasCapacity = (p: PeerCapabilityEntry) =>
@@ -69,25 +69,29 @@ export function selectRunner(
 
   // Priority 1: dedicated runners with required labels that have capacity
   const dedicated = peers.filter((p) => p.runner && hasLabels(p) && hasCapacity(p));
-  if (dedicated.length > 0) {
-    return pickBest(dedicated);
-  }
 
   // Priority 2: any peer with required labels (fallback=any only)
-  if (req.fallback === "any") {
-    const any = peers.filter((p) => hasLabels(p) && hasCapacity(p));
-    if (any.length > 0) return pickBest(any);
-  }
+  const fallback =
+    req.fallback === "any"
+      ? peers.filter((p) => !p.runner && hasLabels(p) && hasCapacity(p))
+      : [];
 
-  return null;
+  return [...sortByLoad(dedicated), ...sortByLoad(fallback)].map((p) => p.name);
 }
 
-function pickBest(candidates: PeerCapabilityEntry[]): string {
-  const sorted = [...candidates].sort((a, b) => {
+// Kept for backwards compatibility — returns the top-ranked candidate or null.
+export function selectRunner(
+  peers: PeerCapabilityEntry[],
+  req: RunnerRequirements,
+): string | null {
+  return rankRunners(peers, req)[0] ?? null;
+}
+
+function sortByLoad(candidates: PeerCapabilityEntry[]): PeerCapabilityEntry[] {
+  return [...candidates].sort((a, b) => {
     if (a.jobs_running !== b.jobs_running) return a.jobs_running - b.jobs_running;
     return a.cpu_percent - b.cpu_percent;
   });
-  return sorted[0]!.name;
 }
 
 // ---------- build peer capability entries from Daemon ----------
@@ -152,20 +156,14 @@ export async function onManualRun(
 
   const candidates = peerCapabilities(state);
   console.log(`[ci] runner candidates: [${candidates.map((c) => `${c.name}(runner=${c.runner},jobs=${c.jobs_running}/${c.max_concurrent_jobs})`).join(", ")}]`);
-  const selectedPeer = selectRunner(candidates, pipeline.runner);
+  const rankedPeers = rankRunners(candidates, pipeline.runner);
 
   // Always persist the run on the originating node so CiStarted/CiCompleted
   // updates from the runner are applied even when the run was assigned remotely.
   state.ci.setRun(run);
   void saveRun(state.root, run);
 
-  if (selectedPeer) {
-    console.log(`[ci] assigning run ${runId} to peer ${selectedPeer}`);
-    await sendAssignment(state, selectedPeer, run, pipeline, trigger);
-  } else {
-    console.log(`[ci] no peer runner available, running ${runId} locally`);
-    scheduleLocalRun(state, pipeline, run);
-  }
+  await assignWithFallback(state, rankedPeers, run, pipeline, trigger);
 }
 
 // ---------- ref update hook ----------
@@ -215,20 +213,35 @@ export async function onRefUpdate(
 
   const candidates = peerCapabilities(state);
   console.log(`[ci] runner candidates: [${candidates.map((c) => `${c.name}(runner=${c.runner},jobs=${c.jobs_running}/${c.max_concurrent_jobs})`).join(", ")}]`);
-  const selectedPeer = selectRunner(candidates, pipeline.runner);
+  const rankedPeers = rankRunners(candidates, pipeline.runner);
 
   // Always persist the run on the originating node so CiStarted/CiCompleted
   // updates from the runner are applied even when the run was assigned remotely.
   state.ci.setRun(run);
   void saveRun(state.root, run);
 
-  if (selectedPeer) {
-    console.log(`[ci] assigning run ${runId} to peer ${selectedPeer}`);
-    await sendAssignment(state, selectedPeer, run, pipeline, trigger);
-  } else {
-    console.log(`[ci] no peer runner available, running ${runId} locally`);
-    scheduleLocalRun(state, pipeline, run);
+  await assignWithFallback(state, rankedPeers, run, pipeline, trigger);
+}
+
+const MAX_ASSIGNMENT_ATTEMPTS = 3;
+
+async function assignWithFallback(
+  state: SchedulerCtx,
+  rankedPeers: string[],
+  run: PipelineRun,
+  pipeline: Pipeline,
+  trigger: TriggerKind,
+): Promise<void> {
+  for (const peer of rankedPeers.slice(0, MAX_ASSIGNMENT_ATTEMPTS)) {
+    console.log(`[ci] assigning run ${run.run_id} to peer ${peer}`);
+    if (await sendAssignment(state, peer, run, pipeline, trigger)) return;
   }
+  if (rankedPeers.length === 0) {
+    console.log(`[ci] no peer runner available, running ${run.run_id} locally`);
+  } else {
+    console.log(`[ci] all peer assignments failed, running ${run.run_id} locally`);
+  }
+  scheduleLocalRun(state, pipeline, run);
 }
 
 async function sendAssignment(
@@ -237,7 +250,7 @@ async function sendAssignment(
   run: PipelineRun,
   pipeline: Pipeline,
   trigger: TriggerKind,
-): Promise<void> {
+): Promise<boolean> {
   const msg: CiMessage = {
     type: "CiAssignment",
     run_id: run.run_id,
@@ -253,7 +266,7 @@ async function sendAssignment(
   const entry = state.peers.get(peer);
   if (!entry) {
     console.log(`[ci] assignment failed: peer ${peer} not in registry`);
-    return;
+    return false;
   }
 
   for (const addr of entry.addresses) {
@@ -273,7 +286,7 @@ async function sendAssignment(
       if (resp.ok) {
         console.log(`[ci] assignment ${run.run_id} delivered to ${peer} via ${addr}`);
         clearTimeout(timer);
-        return;
+        return true;
       }
       console.log(`[ci] assignment to ${peer} via ${addr} returned HTTP ${resp.status}`);
     } catch (e) {
@@ -281,6 +294,7 @@ async function sendAssignment(
     } finally { clearTimeout(timer); }
   }
   console.log(`[ci] assignment ${run.run_id} could not be delivered to ${peer} (all addresses failed)`);
+  return false;
 }
 
 // Exported for testing. Checks if `sha` is present in `mirrorPath`; if not,
@@ -309,7 +323,12 @@ export async function resolveShaviaIPeers(
 function scheduleLocalRun(state: SchedulerCtx, pipeline: Pipeline, run: PipelineRun): void {
   state.ci.setRun(run);
   state.notifyCiRunChanged(run.repo);
-  void runLocalPipeline(state, pipeline, run);
+  void runLocalPipeline(state, pipeline, run).catch((e) => {
+    console.log(`[ci] run ${run.run_id} crashed unexpectedly: ${(e as Error).message}`);
+    const failed = { ...state.ci.getRun(run.run_id) ?? run, status: "failed" as const };
+    state.ci.setRun(failed);
+    state.notifyCiRunChanged(run.repo);
+  });
 }
 
 async function runLocalPipeline(state: SchedulerCtx, pipeline: Pipeline, run: PipelineRun): Promise<void> {

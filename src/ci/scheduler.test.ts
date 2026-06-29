@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { selectRunner, matchesBranch, resolveShaviaIPeers, type PeerCapabilityEntry } from "./scheduler.ts";
+import { selectRunner, rankRunners, matchesBranch, resolveShaviaIPeers, type PeerCapabilityEntry } from "./scheduler.ts";
 import type { RunnerRequirements } from "./types.ts";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -96,6 +96,81 @@ describe("selectRunner", () => {
       makePeer("bob", { labels: ["docker", "linux"] }),
     ];
     expect(selectRunner(peers, multiReq)).toBe("bob");
+  });
+});
+
+describe("rankRunners", () => {
+  const req: RunnerRequirements = { labels: ["docker"], fallback: "any" };
+
+  it("returns empty array when no peers", () => {
+    expect(rankRunners([], req)).toEqual([]);
+  });
+
+  it("returns empty array when all peers fail label requirements", () => {
+    const peers = [makePeer("alice", { labels: ["bare"] })];
+    expect(rankRunners(peers, req)).toEqual([]);
+  });
+
+  it("returns empty array when all peers are at capacity", () => {
+    const peers = [makePeer("alice", { jobs_running: 4, max_concurrent_jobs: 4 })];
+    expect(rankRunners(peers, req)).toEqual([]);
+  });
+
+  it("returns all eligible candidates, not just the best one", () => {
+    const peers = [makePeer("alice"), makePeer("bob"), makePeer("carol")];
+    expect(rankRunners(peers, req)).toHaveLength(3);
+  });
+
+  it("orders candidates by jobs_running ascending", () => {
+    const peers = [
+      makePeer("alice", { jobs_running: 2 }),
+      makePeer("bob", { jobs_running: 0 }),
+      makePeer("carol", { jobs_running: 1 }),
+    ];
+    expect(rankRunners(peers, req)).toEqual(["bob", "carol", "alice"]);
+  });
+
+  it("uses cpu_percent as tiebreaker within the same jobs_running", () => {
+    const peers = [
+      makePeer("alice", { jobs_running: 0, cpu_percent: 80 }),
+      makePeer("bob", { jobs_running: 0, cpu_percent: 20 }),
+      makePeer("carol", { jobs_running: 0, cpu_percent: 50 }),
+    ];
+    expect(rankRunners(peers, req)).toEqual(["bob", "carol", "alice"]);
+  });
+
+  it("dedicated runners appear before fallback peers regardless of load", () => {
+    const peers = [
+      makePeer("non-runner", { runner: false, jobs_running: 0, cpu_percent: 0 }),
+      makePeer("dedicated", { runner: true, jobs_running: 3, cpu_percent: 90 }),
+    ];
+    const ranked = rankRunners(peers, req);
+    expect(ranked[0]).toBe("dedicated");
+    expect(ranked[1]).toBe("non-runner");
+  });
+
+  it("with fallback=none, non-runner peers are excluded from the list", () => {
+    const strictReq: RunnerRequirements = { labels: ["docker"], fallback: "none" };
+    const peers = [
+      makePeer("alice", { runner: false }),
+      makePeer("bob", { runner: true }),
+    ];
+    expect(rankRunners(peers, strictReq)).toEqual(["bob"]);
+  });
+
+  it("with fallback=none, returns empty array when only non-runner peers exist", () => {
+    const strictReq: RunnerRequirements = { labels: ["docker"], fallback: "none" };
+    const peers = [makePeer("alice", { runner: false })];
+    expect(rankRunners(peers, strictReq)).toEqual([]);
+  });
+
+  it("excludes capacity-full peers from both tiers", () => {
+    const peers = [
+      makePeer("full-runner", { runner: true, jobs_running: 4, max_concurrent_jobs: 4 }),
+      makePeer("full-fallback", { runner: false, jobs_running: 4, max_concurrent_jobs: 4 }),
+      makePeer("open", { runner: true, jobs_running: 1 }),
+    ];
+    expect(rankRunners(peers, req)).toEqual(["open"]);
   });
 });
 
