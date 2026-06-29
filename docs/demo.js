@@ -138,13 +138,13 @@
 
     await Promise.all([
       alice.cmd("alice ~ $", "mesh start", 60, async () => {
-        await alice.out("t-out", "listening on https://0.0.0.0:7979", 300);
+        await alice.out("t-out", "listening on https://localhost:7979", 300);
         await alice.out("t-success", "✓  mesh running", 80);
       }),
       (async () => {
         await sleep(200);
         await bob.cmd("bob ~ $", "mesh start", 60, async () => {
-          await bob.out("t-out", "listening on https://0.0.0.0:7979", 300);
+          await bob.out("t-out", "listening on https://localhost:7979", 300);
           await bob.out("t-success", "✓  mesh running", 80);
         });
       })(),
