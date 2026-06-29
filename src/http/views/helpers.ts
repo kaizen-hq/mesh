@@ -21,6 +21,21 @@ export function fill(template: string, vars: Record<string, string>): string {
 
 // ---------- dates ----------
 
+const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
+export function formatDateTime(iso: string): string {
+  const d = new Date(iso);
+  const mon = MONTHS[d.getMonth()]!;
+  const day = String(d.getDate()).padStart(2, "0");
+  const h   = String(d.getHours()).padStart(2, "0");
+  const min = String(d.getMinutes()).padStart(2, "0");
+  const sec = String(d.getSeconds()).padStart(2, "0");
+  const thisYear = new Date().getFullYear();
+  return d.getFullYear() === thisYear
+    ? `${mon} ${day} ${h}:${min}:${sec}`
+    : `${mon} ${day} ${d.getFullYear()} ${h}:${min}:${sec}`;
+}
+
 export function relativeAge(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime();
   const m = Math.floor(diff / 60_000);

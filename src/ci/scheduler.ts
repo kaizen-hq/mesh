@@ -19,6 +19,7 @@ import type { Pipeline, PipelineRun, TriggerKind, RunnerRequirements } from "./t
 import type { CiMessage } from "../proto.ts";
 import { signFrame } from "../proto.ts";
 import { loadPipelineFromMirror } from "./config.ts";
+import { saveRun } from "./store.ts";
 import * as repoStore from "../repo_store.ts";
 import { normalizePeerUrl } from "../config.ts";
 import { encodeFrame } from "../proto.ts";
@@ -155,6 +156,11 @@ export async function onManualRun(
   console.log(`[ci] runner candidates: [${candidates.map((c) => `${c.name}(runner=${c.runner},jobs=${c.jobs_running}/${c.max_concurrent_jobs})`).join(", ")}]`);
   const selectedPeer = selectRunner(candidates, pipeline.runner);
 
+  // Always persist the run on the originating node so CiStarted/CiCompleted
+  // updates from the runner are applied even when the run was assigned remotely.
+  state.ci.setRun(run);
+  void saveRun(state.root, run);
+
   if (selectedPeer) {
     console.log(`[ci] assigning run ${runId} to peer ${selectedPeer}`);
     await sendAssignment(state, selectedPeer, run, pipeline, trigger);
@@ -212,6 +218,11 @@ export async function onRefUpdate(
   const candidates = peerCapabilities(state);
   console.log(`[ci] runner candidates: [${candidates.map((c) => `${c.name}(runner=${c.runner},jobs=${c.jobs_running}/${c.max_concurrent_jobs})`).join(", ")}]`);
   const selectedPeer = selectRunner(candidates, pipeline.runner);
+
+  // Always persist the run on the originating node so CiStarted/CiCompleted
+  // updates from the runner are applied even when the run was assigned remotely.
+  state.ci.setRun(run);
+  void saveRun(state.root, run);
 
   if (selectedPeer) {
     console.log(`[ci] assigning run ${runId} to peer ${selectedPeer}`);

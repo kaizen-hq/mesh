@@ -1,6 +1,6 @@
 // CI page rendering — pure functions, no Daemon dependency.
 
-import { esc, fill, relativeAge, ciStatusBadge } from "./helpers.ts";
+import { esc, fill, relativeAge, formatDateTime, ciStatusBadge } from "./helpers.ts";
 import type { PipelineRun } from "../../ci/types.ts";
 
 // ---------- pipelines list page ----------
@@ -25,7 +25,7 @@ function renderRunRows(runs: PipelineRun[], repo: string): string {
       <td>${esc(trigger)}</td>
       <td>${esc(run.runner)}</td>
       <td>${esc(dur)}</td>
-      <td><a href="/repos/${esc(repo)}/ci/${esc(run.run_id)}">${relativeAge(run.started_at)}</a></td>
+      <td><a href="/repos/${esc(repo)}/ci/${esc(run.run_id)}" title="${esc(relativeAge(run.started_at))} ago">${esc(formatDateTime(run.started_at))}</a></td>
     </tr>`;
   }
   if (!rows) rows = `<tr><td colspan="7"><em>(no runs yet)</em></td></tr>`;
@@ -164,6 +164,7 @@ es.addEventListener('log-chunk', e => {
     trigger,
     runner: esc(run.runner),
     duration: esc(dur),
+    started_at: `<span title="${esc(relativeAge(run.started_at))} ago">${esc(formatDateTime(run.started_at))}</span>`,
     job_rows: jobRows,
     log_block: logBlock,
   });
