@@ -13,7 +13,6 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
   return {
     self: { name: "alice", peer_port: 7979 },
     peers: [],
-    repos: [],
     transport: { tls: false, poll_secs: 10 },
     runner: DEFAULT_RUNNER,
     raw_hash: "abc123",

@@ -2,12 +2,14 @@
 
 import type { CiDomain } from "./ci_domain.ts";
 import type { Config } from "../config.ts";
+import type { RepoRegistry } from "../repo_registry.ts";
 import { loadRun, listRuns, readLog } from "./store.ts";
 import type { PipelineRun } from "./types.ts";
 
 export interface CiHttpCtx {
   ci: CiDomain;
   config: Config;
+  repos: RepoRegistry;
   root: string;
 }
 
@@ -49,10 +51,10 @@ export async function handleLogChunks(
     if (run.run_id === runId) { repo = run.repo; break; }
   }
   if (!repo) {
-    // Try scanning store
-    for (const r of state.config.repos) {
-      const run = await loadRun(state.root, r.name, runId);
-      if (run) { repo = r.name; break; }
+    // Try scanning all known repos in the registry.
+    for (const [name] of state.repos.entries()) {
+      const run = await loadRun(state.root, name, runId);
+      if (run) { repo = name; break; }
     }
   }
   if (!repo) return text(404, "run not found");

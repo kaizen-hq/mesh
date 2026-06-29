@@ -10,7 +10,6 @@ import { onRefUpdate } from "./ci/scheduler.ts";
 import {
   loadConfig,
   addPeerToConfig,
-  addRepoToConfig,
   normalizePeerUrl,
   type Config,
   type PersistedInvite,
@@ -207,23 +206,9 @@ async function dispatch(state: ControlCtx, req: ControlRequest): Promise<Control
         return { type: "error", message: (e as Error).message };
       }
     }
-    case "add_repo": {
-      const name = String(req.name ?? "").trim();
-      const repoPath = String(req.path ?? "").trim();
-      if (!name || !repoPath) {
-        return { type: "error", message: "add_repo requires name and path" };
-      }
-      const cfgPath = path.join(state.root, "mesh.toml");
-      try {
-        const changed = await addRepoToConfig(cfgPath, { name, path: repoPath });
-        const next = await loadConfig(cfgPath);
-        state.config = next;
-        state.peers.refresh(state.config);
-        await repoStore.ensureMirrors(state);
-        return { type: "ok", changed } as ControlResponse;
-      } catch (e) {
-        return { type: "error", message: (e as Error).message };
-      }
+    case "list_repos": {
+      const summaries = await repoSummaries(state, now);
+      return { type: "repos", repos: summaries };
     }
     case "invite": {
       const ttlSecs = Number(req.ttl_secs ?? 600);
@@ -333,14 +318,14 @@ async function dispatch(state: ControlCtx, req: ControlRequest): Promise<Control
     case "ci_status": {
       const repo = req.repo ? String(req.repo) : null;
       const { listRuns, loadRun } = await import("./ci/store.ts");
-      const repos = repo
-        ? state.config.repos.filter((r) => r.name === repo)
-        : state.config.repos;
+      const repoNames = repo
+        ? [repo]
+        : [...state.repos.keys()];
       const runList: unknown[] = [];
-      for (const r of repos) {
-        const entries = await listRuns(state.root, r.name);
+      for (const name of repoNames) {
+        const entries = await listRuns(state.root, name);
         for (const e of entries.slice(0, 10)) {
-          const run = await loadRun(state.root, r.name, e.run_id);
+          const run = await loadRun(state.root, name, e.run_id);
           if (run) runList.push(run);
         }
       }
@@ -408,18 +393,17 @@ function peerSummaries(state: ControlCtx, now: number): unknown[] {
 }
 
 async function repoSummaries(state: ControlCtx, now: number): Promise<unknown[]> {
-  const contributed = new Set(state.config.repos.map((r) => r.name));
-  const allNames = new Set<string>(contributed);
-  for (const k of state.repos.keys()) allNames.add(k);
-  return [...allNames].sort().map((name) => {
+  const names = [...state.repos.keys()].sort();
+  return Promise.all(names.map(async (name) => {
     const local = state.repos.get(name);
+    const meta = await repoStore.loadRepoMeta(state.root, name);
     return {
       name,
-      contributed: contributed.has(name),
+      introduced_by: meta?.introduced_by ?? null,
+      introduced_at: meta?.introduced_at ?? null,
       sources: local?.sourceList() ?? [],
       local_head: local?.lastHead ?? null,
       last_fetch_secs: local?.lastFetch ? Math.floor((now - local.lastFetch) / 1000) : null,
-
       divergences:
         local?.divergenceList().map((d) => ({
           peer: d.peer,
@@ -428,7 +412,7 @@ async function repoSummaries(state: ControlCtx, now: number): Promise<unknown[]>
           their_sha: d.their_sha,
         })) ?? [],
     };
-  });
+  }));
 }
 
 function inferReachableAddress(state: ControlCtx): string {

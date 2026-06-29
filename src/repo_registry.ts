@@ -2,8 +2,6 @@
 // Callers get a RepoLocal from get() or ensure() and mutate it directly
 // (lastFetch, lastHead, noteSource, setDivergencesForPeer).
 
-import type { Config } from "./config.ts";
-
 export interface Divergence {
   peer: string;
   branch: string;
@@ -36,12 +34,8 @@ export class RepoRegistry {
 
   private constructor() {}
 
-  static create(config: Config): RepoRegistry {
-    const registry = new RepoRegistry();
-    for (const r of config.repos) {
-      registry.repos.set(r.name, new RepoLocal());
-    }
-    return registry;
+  static create(): RepoRegistry {
+    return new RepoRegistry();
   }
 
   get(name: string): RepoLocal | undefined {

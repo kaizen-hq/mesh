@@ -40,7 +40,6 @@ async function startNode(
   const config: Config = {
     self: { name, peer_port: 0 },
     peers: [{ name, pubkey: identity.pubkeyString, addresses: [] }, ...peers],
-    repos: [],
     transport: { tls: false, poll_secs: 10 },
     runner: DEFAULT_RUNNER,
     raw_hash: "e2e-test",

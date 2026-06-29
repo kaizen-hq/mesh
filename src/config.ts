@@ -19,11 +19,6 @@ export interface PeerEntry {
   addresses: string[];
 }
 
-export interface RepoEntry {
-  name: string;
-  path: string;
-}
-
 export interface TransportSection {
   tls: boolean;
   poll_secs: number;
@@ -32,7 +27,6 @@ export interface TransportSection {
 export interface Config {
   self: SelfSection;
   peers: PeerEntry[];
-  repos: RepoEntry[];
   transport: TransportSection;
   runner: RunnerConfig;
   raw_hash: string;
@@ -55,7 +49,7 @@ export const DEFAULT_RUNNER: RunnerConfig = {
   log_retention_runs: 50,
 };
 
-const KNOWN_TOP_LEVEL = new Set(["self", "peers", "repos", "transport", "runner"]);
+const KNOWN_TOP_LEVEL = new Set(["self", "peers", "transport", "runner"]);
 const KNOWN_SELF = new Set(["name", "peer_port"]);
 const KNOWN_TRANSPORT = new Set(["tls", "poll_secs"]);
 const KNOWN_RUNNER = new Set([
@@ -64,7 +58,6 @@ const KNOWN_RUNNER = new Set([
   "max_worktree_disk_mb", "log_retention_runs",
 ]);
 const KNOWN_PEER = new Set(["name", "pubkey", "addresses", "address"]);
-const KNOWN_REPO = new Set(["name", "path"]);
 
 function warnUnknown(file: string, section: string, obj: Record<string, unknown>, known: Set<string>): void {
   for (const key of Object.keys(obj)) {
@@ -106,14 +99,9 @@ export async function loadConfig(file: string): Promise<Config> {
     } satisfies PeerEntry;
   });
 
-  const repos = ((t["repos"] as unknown[]) ?? []).map((r) => {
-    const o = r as Record<string, unknown>;
-    warnUnknown(file, "repos[]", o, KNOWN_REPO);
-    return {
-      name: String(o.name),
-      path: String(o.path),
-    } satisfies RepoEntry;
-  });
+  if (t["repos"]) {
+    console.warn(`WARN ${file}: [repos] is no longer supported — repos are discovered automatically via git push`);
+  }
 
   const tx = (t["transport"] ?? {}) as Record<string, unknown>;
   warnUnknown(file, "transport", tx, KNOWN_TRANSPORT);
@@ -154,7 +142,6 @@ export async function loadConfig(file: string): Promise<Config> {
   return {
     self: { name, peer_port },
     peers,
-    repos,
     transport,
     runner,
     raw_hash: hash,
@@ -170,7 +157,6 @@ export function seedConfig(myName: string, myPubkey: string): string {
       execution_modes: ["docker"],
     },
     peers: [{ name: myName, pubkey: myPubkey }],
-    repos: [],
   });
 }
 
@@ -180,7 +166,6 @@ interface RawConfigDoc {
   self?: Record<string, unknown>;
   runner?: Record<string, unknown>;
   peers?: Array<Record<string, unknown>>;
-  repos?: Array<Record<string, unknown>>;
   transport?: Record<string, unknown>;
 }
 
@@ -232,31 +217,6 @@ export async function addPeerToConfig(
     const entry: Record<string, unknown> = { name: peer.name, pubkey: peer.pubkey };
     if (peer.addresses.length > 0) entry.addresses = [...peer.addresses];
     doc.peers.push(entry);
-  }
-  await writeDocAtomic(file, doc);
-  return true;
-}
-
-/** Add (or update) a repo entry in mesh.toml. Returns true if the file changed. */
-export async function addRepoToConfig(
-  file: string,
-  repo: RepoEntry,
-): Promise<boolean> {
-  const doc = await readDoc(file);
-  doc.repos ??= [];
-  const existing = doc.repos.find((r) => String(r.name) === repo.name);
-  if (existing) {
-    let changed = false;
-    if (String(existing.path) !== repo.path) {
-      existing.path = repo.path;
-      changed = true;
-    }
-    if (!changed) return false;
-  } else {
-    doc.repos.push({
-      name: repo.name,
-      path: repo.path,
-    });
   }
   await writeDocAtomic(file, doc);
   return true;
@@ -325,10 +285,6 @@ export function normalizePeerUrl(
 
 export function findPeer(cfg: Config, name: string): PeerEntry | undefined {
   return cfg.peers.find((p) => p.name === name);
-}
-
-export function findRepo(cfg: Config, name: string): RepoEntry | undefined {
-  return cfg.repos.find((r) => r.name === name);
 }
 
 // ---------- pending_invites.json ----------
