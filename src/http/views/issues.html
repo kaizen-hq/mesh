@@ -20,6 +20,8 @@
 
 {{board}}
 
+{{pagination}}
+
 <footer><a href="/status">mesh status</a> &middot; built on Bun</footer>
 
 <script>
@@ -85,7 +87,7 @@ if (location.hash) toggleCard(location.hash.slice(1));
 const es = new EventSource(location.pathname + '/events');
 es.addEventListener('board-changed', async () => {
   try {
-    const html = await fetch(location.pathname + '/board').then(r => r.text());
+    const html = await fetch(location.pathname + '/board' + location.search).then(r => r.text());
     const tmp = document.createElement('div');
     tmp.innerHTML = html;
     const next = tmp.firstElementChild;

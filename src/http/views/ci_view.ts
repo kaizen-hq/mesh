@@ -1,13 +1,13 @@
 // CI page rendering — pure functions, no Daemon dependency.
 
-import { esc, fill, relativeAge, formatDateTime, ciStatusBadge } from "./helpers.ts";
+import { esc, fill, relativeAge, formatDateTime, ciStatusBadge, renderPagination } from "./helpers.ts";
 import type { PipelineRun } from "../../ci/types.ts";
 
 // ---------- pipelines list page ----------
 
 function renderRunRows(runs: PipelineRun[], repo: string): string {
   let rows = "";
-  for (const run of runs.slice(0, 50)) {
+  for (const run of runs) {
     const sha7 = run.sha.slice(0, 7);
     const ref = run.ref.replace("refs/heads/", "");
     const trigger = run.triggered_by.type === "push"
@@ -86,6 +86,7 @@ export function renderCiPipelinesPage(
   repo: string,
   runs: PipelineRun[],
   hasPipeline: boolean,
+  pagination: string,
 ): string {
   const content = hasPipeline
     ? `<form class="run-form" method="POST" action="/repos/${esc(repo)}/ci/run">
@@ -98,6 +99,7 @@ export function renderCiPipelinesPage(
   <thead><tr><th>status</th><th>ref</th><th>sha</th><th>triggered by</th><th>runner</th><th>duration</th><th>started</th></tr></thead>
   <tbody>${renderRunRows(runs, repo)}</tbody>
 </table>
+${pagination}
 </div>`
     : renderNoPipelineBlock(repo);
 

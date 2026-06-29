@@ -106,6 +106,45 @@ export function labelColor(label: string): { bg: string; dot: string } {
   return LABEL_COLORS[Math.abs(h) % LABEL_COLORS.length]!;
 }
 
+// ---------- pagination ----------
+
+const VALID_SIZES = [10, 20, 50, 100];
+
+export function parsePage(raw: string | null): number {
+  const n = parseInt(raw ?? "0", 10);
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+}
+
+export function parseSize(raw: string | null, defaultSize = 100): number {
+  const n = parseInt(raw ?? String(defaultSize), 10);
+  return VALID_SIZES.includes(n) ? n : defaultSize;
+}
+
+export function renderPagination(page: number, size: number, total: number, baseUrl: string): string {
+  if (total === 0) return "";
+  const totalPages = Math.ceil(total / size);
+  const from = page * size + 1;
+  const to = Math.min((page + 1) * size, total);
+
+  const prevHref = page > 0 ? `${baseUrl}?page=${page - 1}&size=${size}` : null;
+  const nextHref = page < totalPages - 1 ? `${baseUrl}?page=${page + 1}&size=${size}` : null;
+
+  const sizeOptions = VALID_SIZES
+    .map((s) => `<option value="${s}"${s === size ? " selected" : ""}>${s} per page</option>`)
+    .join("");
+
+  return `<div class="pagination">
+  <span class="page-info">showing ${from}–${to} of ${total}</span>
+  <form class="page-size-form" method="GET" action="${baseUrl}">
+    <input type="hidden" name="page" value="0">
+    <select name="size" onchange="this.form.submit()">${sizeOptions}</select>
+  </form>
+  ${prevHref ? `<a class="page-btn" href="${prevHref}">← prev</a>` : `<span class="page-btn disabled">← prev</span>`}
+  <span class="page-num">${page + 1} / ${totalPages}</span>
+  ${nextHref ? `<a class="page-btn" href="${nextHref}">next →</a>` : `<span class="page-btn disabled">next →</span>`}
+</div>`;
+}
+
 export function renderLabelDots(labels: string[]): string {
   if (!labels.length) return "";
   return labels

@@ -130,3 +130,15 @@ td code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size
 .card[draggable="true"]:active { cursor: grabbing; }
 .card.drag-over { outline: 2px solid #1d1f22; outline-offset: 2px; }
 .card.dragging { opacity: .35; }
+
+/* ---------- pagination ---------- */
+
+.pagination { display: flex; align-items: center; gap: .75rem; margin-top: 1rem; font-size: 12px; color: #555; flex-wrap: wrap; }
+.page-info { color: #888; }
+.page-size-form { display: inline-flex; }
+.page-size-form select { font-family: inherit; font-size: 12px; border: 1px solid #ddd; border-radius: 3px; padding: 2px 4px; background: #fff; color: #555; cursor: pointer; }
+.page-size-form select:hover { border-color: #aaa; }
+.page-btn { padding: 2px 8px; border: 1px solid #ddd; border-radius: 3px; text-decoration: none; color: #555; background: #fff; }
+.page-btn:hover:not(.disabled) { background: #f0f0f0; border-color: #aaa; }
+.page-btn.disabled { color: #ccc; border-color: #eee; cursor: default; pointer-events: none; }
+.page-num { color: #888; }

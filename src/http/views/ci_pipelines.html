@@ -20,7 +20,7 @@
 const es = new EventSource(location.pathname + '/events');
 es.addEventListener('run-changed', async () => {
   try {
-    const html = await fetch(location.pathname).then(r => r.text());
+    const html = await fetch(location.href).then(r => r.text());
     const tmp = document.createElement('div');
     tmp.innerHTML = html;
     const next = tmp.querySelector('#runs-table');

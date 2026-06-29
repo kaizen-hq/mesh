@@ -14,6 +14,7 @@ import { loadViews, type Views } from "./http/views/loader.ts";
 import { renderStatusData, renderStatusPageFull } from "./http/views/status_view.ts";
 import { renderBoardGridForRepo, renderBoardPage } from "./http/views/issues_view.ts";
 import { renderCiPipelinesPage, renderCiRunDetailPage } from "./http/views/ci_view.ts";
+import { parsePage, parseSize, renderPagination } from "./http/views/helpers.ts";
 import {
   decodeFrame,
   decodePubkey,
@@ -340,7 +341,7 @@ async function handleCi(
 
   // GET /repos/:name/ci → pipelines tab (run list)
   if (tail === "" || tail === "/") {
-    if (method === "GET") return handleCiPipelinesTab(state, views, repo);
+    if (method === "GET") return handleCiPipelinesTab(state, views, req, repo);
     return textResponse(405, "method not allowed");
   }
 
@@ -367,7 +368,11 @@ async function handleCi(
   return textResponse(404, "not found");
 }
 
-async function handleCiPipelinesTab(state: Daemon, views: Views, repo: string): Promise<Response> {
+async function handleCiPipelinesTab(state: Daemon, views: Views, req: Request, repo: string): Promise<Response> {
+  const url = new URL(req.url);
+  const page = parsePage(url.searchParams.get("page"));
+  const size = parseSize(url.searchParams.get("size"));
+
   const repoCfg = state.config.repos.find((r) => r.name === repo);
   const repoAbsPath = repoCfg
     ? (path.isAbsolute(repoCfg.path) ? repoCfg.path : path.join(os.homedir(), repoCfg.path))
@@ -396,7 +401,11 @@ async function handleCiPipelinesTab(state: Daemon, views: Views, repo: string): 
   const hasPipeline = pipeline !== null || allRuns.length > 0;
   const me = state.config.self.name;
 
-  return new Response(renderCiPipelinesPage(views.ciPipelines, me, repo, allRuns, hasPipeline), {
+  const pageRuns = allRuns.slice(page * size, (page + 1) * size);
+  const baseUrl = `/repos/${encodeURIComponent(repo)}/ci`;
+  const pagination = renderPagination(page, size, allRuns.length, baseUrl);
+
+  return new Response(renderCiPipelinesPage(views.ciPipelines, me, repo, pageRuns, hasPipeline, pagination), {
     status: 200,
     headers: { "content-type": "text/html; charset=utf-8" },
   });
@@ -658,14 +667,14 @@ async function handleIssues(
   const method = req.method;
 
   if (tail === "" || tail === "/") {
-    if (method === "GET") return handleIssueBoard(state, views, repo);
+    if (method === "GET") return handleIssueBoard(state, views, req, repo);
     if (method === "POST") return handleIssueCreate(state, req, repo);
   }
   if (tail === "/events" && method === "GET") {
     return handleIssueEvents(repo);
   }
   if (tail === "/board" && method === "GET") {
-    return handleIssueBoardFragment(state, repo);
+    return handleIssueBoardFragment(state, req, repo);
   }
   const actionMatch = /^\/([^/]+)\/(comment|status|order)$/.exec(tail);
   if (actionMatch && method === "POST") {
@@ -686,18 +695,28 @@ async function handleIssueAll(state: Daemon, repo: string): Promise<Response> {
   });
 }
 
-async function handleIssueBoard(state: Daemon, views: Views, repo: string): Promise<Response> {
+async function handleIssueBoard(state: Daemon, views: Views, req: Request, repo: string): Promise<Response> {
+  const url = new URL(req.url);
+  const page = parsePage(url.searchParams.get("page"));
+  const size = parseSize(url.searchParams.get("size"));
   const all = await issues.listIssues(state.root, repo);
+  const pageIssues = all.slice(page * size, (page + 1) * size);
+  const baseUrl = `/repos/${encodeURIComponent(repo)}/issues`;
+  const pagination = renderPagination(page, size, all.length, baseUrl);
   const me = state.config.self.name;
-  return new Response(renderBoardPage(views.issues, me, repo, all), {
+  return new Response(renderBoardPage(views.issues, me, repo, pageIssues, pagination), {
     status: 200,
     headers: { "content-type": "text/html; charset=utf-8" },
   });
 }
 
-async function handleIssueBoardFragment(state: Daemon, repo: string): Promise<Response> {
+async function handleIssueBoardFragment(state: Daemon, req: Request, repo: string): Promise<Response> {
+  const url = new URL(req.url);
+  const page = parsePage(url.searchParams.get("page"));
+  const size = parseSize(url.searchParams.get("size"));
   const all = await issues.listIssues(state.root, repo);
-  return new Response(renderBoardGridForRepo(all, repo), {
+  const pageIssues = all.slice(page * size, (page + 1) * size);
+  return new Response(renderBoardGridForRepo(pageIssues, repo), {
     status: 200,
     headers: { "content-type": "text/html; charset=utf-8" },
   });

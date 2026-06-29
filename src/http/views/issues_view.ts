@@ -77,7 +77,7 @@ ${cards}
 
 // ---------- full board page ----------
 
-export function renderBoardPage(template: string, me: string, repo: string, all: Issue[]): string {
+export function renderBoardPage(template: string, me: string, repo: string, all: Issue[], pagination: string): string {
   const labels = collectLabels(all);
   const chipHtml = labels.map((l) => {
     const c = labelColor(l);
@@ -90,6 +90,7 @@ export function renderBoardPage(template: string, me: string, repo: string, all:
     repo_enc: encodeURIComponent(repo),
     filter_chips: chipHtml,
     board: renderBoardGridForRepo(all, repo),
+    pagination,
   });
 }
 
