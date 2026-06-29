@@ -4,7 +4,7 @@
 - Routes: git smart-HTTP at `/<repo>.git/...`, `POST /mesh/frame` for signed
   notifications, `GET /status` for the browser dashboard.
 - Push-only peer link with retry queue + exponential backoff.
-- Full-mesh replication: every peer mirrors every repo any peer contributes.
+- Full-mesh replication: every peer mirrors every repo introduced via `git push`.
 - ed25519-signed frames; bincode-encoded payloads.
 - Built-in CI/CD: distributed pipeline execution, cron scheduling, live log streaming.
 
@@ -99,8 +99,6 @@ mesh repos                                    # list repos + sync freshness
 mesh reload                                   # re-read mesh.toml and secrets.yml without restarting
 mesh sync                                     # force a reconciliation round
 mesh add-peer <name> <pubkey> [addr]          # manually add a peer
-mesh add-repo <name> <path>                   # contribute a working copy
-mesh add-repos <parent-dir>                   # scan a directory and add all git repos
 mesh add-address <peer> <addr>                # bootstrap a known address for a peer
 mesh invite --addr HOST:PORT [--ttl SECS]     # generate a one-time pairing token (default TTL: 600s)
 mesh join <token>                             # accept a pairing token
@@ -282,28 +280,23 @@ runner selection and assign jobs to others):
 enabled = false
 ```
 
-### Registering repos on runner nodes
+### How repos enter the mesh
 
-Every node that will **execute** jobs for a repo must have the repo registered
-in its `mesh.toml`:
+Repos are introduced by pushing to the local node — no registration step required:
 
 ```sh
-mesh add-repo my-app ~/src/my-app
-mesh reload
+git remote add mesh https://localhost:7979/my-app.git
+git push mesh main
 ```
 
-`mesh add-repo` writes the entry to `mesh.toml`. `mesh reload` makes the
-running daemon pick it up immediately without a restart.
+On first push to an unknown repo name, mesh auto-creates the bare mirror at
+`~/.mesh/repos/<name>.git` and records which node introduced it. From that
+point, the mirror is synced to every peer automatically via the normal
+peer-to-peer reconciliation loop.
 
-A local working copy at the registered path is **not required**. Mesh creates
-each run's worktree from the bare mirror at `~/.mesh/repos/<name>.git`, which
-is populated automatically via peer sync. The registered path is only used as a
-bootstrap source to seed the mirror if it is empty when the first run arrives —
-and even then, failure is non-fatal if the mirror has already synced from peers.
-
-Nodes that are not runners (or have `enabled = false`) do not need the repo
-registered — they participate in assignment and show run history in the
-dashboard without executing anything locally.
+Runner nodes execute jobs directly from the bare mirror. No working copy or
+`mesh.toml` entry is needed on any node — every peer that receives the mirror
+(whether it is a runner or not) is immediately eligible to run the pipeline.
 
 ### Secrets
 
@@ -332,10 +325,12 @@ only resolves declared secrets, not arbitrary host variables.
 
 ### How it works
 
-**Trigger → assignment.** When a push arrives on a branch that matches
-`on.push.branches`, the receiving node selects the best available runner from
-the capability gossip it has heard via heartbeats. It sends a `CiAssignment`
-frame to that peer. If no peer has capacity, the job runs locally.
+**Trigger → assignment.** A repo enters the mesh on first `git push` to any
+node; the bare mirror is auto-created and synced to all peers. When a
+subsequent push arrives on a branch that matches `on.push.branches`, the
+receiving node selects the best available runner from the capability gossip it
+has heard via heartbeats. It sends a `CiAssignment` frame to that peer. If no
+peer has capacity, the job runs locally.
 
 **Runner selection.** Dedicated runners (matching `labels`) are preferred.
 Within a tier, the peer with the fewest running jobs and lowest CPU is chosen.
@@ -350,10 +345,11 @@ on the host.
 under `~/.mesh/ci/<repo>/<run_id>/log.txt` and streamed live to the browser
 via SSE.
 
-**Cron scheduling.** Each node runs a cron loop (every `--fetch-secs`). When a
-cron slot fires, all eligible nodes broadcast a `CiCronClaim` frame. A
-deterministic sha256-based election picks one winner to execute the job —
-so the job runs exactly once across the mesh even with many peers online.
+**Cron scheduling.** Each runner-enabled node (`[runner] enabled = true`) runs
+a cron loop. When a cron slot fires, all eligible nodes broadcast a
+`CiCronClaim` frame. A deterministic sha256-based election picks one winner to
+execute the job — so the job runs exactly once across the mesh even with many
+peers online.
 
 **Gossip.** `CiStarted`, `CiCompleted`, and `CiLog` frames propagate to all
 peers so the browser dashboard stays in sync everywhere on the mesh.
@@ -408,7 +404,6 @@ mesh reload
 
 ### Pipeline triggered but jobs never start / run stays `pending`
 
-- **Repo not registered on the runner.** The runner needs the repo cloned locally and registered in its `mesh.toml`. Without it, mesh logs `no reachable source for <repo>` and the run stays `pending`. Fix: clone the repo on the runner node and run `mesh add-repo <name> <path> && mesh reload`.
 - `mesh ci status <repo>` — if the run shows `pending` indefinitely, the runner received the assignment but hasn't started. Check the runner node's daemon logs.
 - `mesh ci runners` — verify the assigned runner shows `runner: true` and `jobs_running` below `max_concurrent_jobs`.
 - If `execution_modes` on the runner doesn't include the mode the job requires (`docker` or `shell`), the job will fail immediately with a log line like `job "X" requires shell mode but "shell" is not in execution_modes`.
