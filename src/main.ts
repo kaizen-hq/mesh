@@ -25,7 +25,6 @@ import pkg from "../package.json" with { type: "json" };
 // Source-paradigm commands need the mesh source tree on the real filesystem,
 // so they're hidden (and refuse to run) inside a `bun build --compile` binary.
 const SOURCE_ONLY_USAGE = `  package [out-path]                Build mesh-src.zip for delivery
-  serve-install [--listen ADDR]     Serve source zip + bun-based installer
 `;
 
 const USAGE_HEAD = `Usage: mesh <command> [args]
