@@ -36,7 +36,7 @@ import * as repoStore from "./repo_store.ts";
 import * as git from "./git.ts";
 import * as issues from "./issues.ts";
 import * as scheduler from "./ci/scheduler.ts";
-import { saveRun } from "./ci/store.ts";
+import { saveRun, appendLogChunk } from "./ci/store.ts";
 import type { PipelineRun } from "./ci/types.ts";
 
 const HTTP_TIMEOUT_MS = 10_000;
@@ -162,6 +162,8 @@ function handleCiRunUpdate(state: PeerLinkCtx, msg: import("./proto.ts").CiMessa
       if (buf) {
         buf.chunks.push({ seq: msg.seq, t: msg.t, stream: msg.stream, data: msg.data });
       }
+      // Persist to the local log file so the UI's tailLog works on non-runner nodes.
+      void appendLogChunk(state.root, msg.repo, msg.run_id, msg.data).catch(() => {});
       break;
     }
   }
