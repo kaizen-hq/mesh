@@ -296,6 +296,7 @@ function cmdUrl(repo: string | undefined) {
 }
 
 async function cmdStart(root: string, args: Args) {
+  console.log(`mesh v${pkg.version}`);
   await ensureDirs(root);
   const id = await loadOrCreate(root);
   console.log(`loaded identity: ${id.pubkeyString}`);
