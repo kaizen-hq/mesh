@@ -222,6 +222,20 @@ export async function addPeerToConfig(
   return true;
 }
 
+/** Remove a peer entry from mesh.toml by name. Returns true if the file changed. */
+export async function removePeerFromConfig(
+  file: string,
+  name: string,
+): Promise<boolean> {
+  const doc = await readDoc(file);
+  if (!Array.isArray(doc.peers)) return false;
+  const before = doc.peers.length;
+  doc.peers = doc.peers.filter((p) => String(p.name) !== name);
+  if (doc.peers.length === before) return false;
+  await writeDocAtomic(file, doc);
+  return true;
+}
+
 // ---------- peer_addresses.toml ----------
 
 export interface AddressCache {

@@ -10,6 +10,7 @@ import { onRefUpdate } from "./ci/scheduler.ts";
 import {
   loadConfig,
   addPeerToConfig,
+  removePeerFromConfig,
   normalizePeerUrl,
   type Config,
   type PersistedInvite,
@@ -201,6 +202,24 @@ async function dispatch(state: ControlCtx, req: ControlRequest): Promise<Control
         state.config = next;
         state.peers.refresh(state.config);
         if (address) await state.recordPeerAddress(name, address);
+        return { type: "ok", changed } as ControlResponse;
+      } catch (e) {
+        return { type: "error", message: (e as Error).message };
+      }
+    }
+    case "remove_peer": {
+      const name = String(req.name ?? "").trim();
+      if (!name) {
+        return { type: "error", message: "remove_peer requires name" };
+      }
+      const cfgPath = path.join(state.root, "mesh.toml");
+      try {
+        const changed = await removePeerFromConfig(cfgPath, name);
+        if (changed) {
+          const next = await loadConfig(cfgPath);
+          state.config = next;
+          state.peers.refresh(state.config);
+        }
         return { type: "ok", changed } as ControlResponse;
       } catch (e) {
         return { type: "error", message: (e as Error).message };

@@ -48,6 +48,7 @@ const USAGE_TAIL = `  start [flags]                     Run the foreground serve
   reset-repo <name>                 hard-reset a mirror
   add-address <peer> <addr>         bootstrap a peer's address
   add-peer <name> <pubkey> [addr]   add a peer to mesh.toml
+  remove-peer <name>                remove a peer from mesh.toml
   invite [--addr HOST:PORT] [--ttl SECS]   print a pairing token for a teammate
   join <token>                      accept a teammate's pairing token
   update [--from PEER] [--ref TAG] [--force]  update to the latest release
@@ -200,6 +201,14 @@ async function main() {
           process.exit(1);
         }
         return await sendAndPrint(root, { type: "add_peer", name, pubkey, address });
+      }
+      case "remove-peer": {
+        const name = args.positional[0];
+        if (!name) {
+          console.error("usage: mesh remove-peer <name>");
+          process.exit(1);
+        }
+        return await sendAndPrint(root, { type: "remove_peer", name });
       }
       case "repos": {
         return await sendAndPrint(root, { type: "list_repos" });
