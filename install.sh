@@ -47,7 +47,7 @@ fi
 
 mkdir -p "$INSTALL_DIR" "$BIN_DIR"
 
-TMP="$(mktemp -d -t mesh-install)"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/mesh-install.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 
 echo "==> downloading mesh ($MESH_REPO @ $MESH_REF)..."
