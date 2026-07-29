@@ -11,6 +11,7 @@ import {
   loadConfig,
   addPeerToConfig,
   removePeerFromConfig,
+  removePeerFromAddressCache,
   normalizePeerUrl,
   type Config,
   type PersistedInvite,
@@ -215,6 +216,7 @@ async function dispatch(state: ControlCtx, req: ControlRequest): Promise<Control
       const cfgPath = path.join(state.root, "mesh.toml");
       try {
         const changed = await removePeerFromConfig(cfgPath, name);
+        await removePeerFromAddressCache(state.root, name);
         if (changed) {
           const next = await loadConfig(cfgPath);
           state.config = next;

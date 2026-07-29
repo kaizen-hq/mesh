@@ -272,6 +272,14 @@ export async function saveAddressCache(root: string, cache: AddressCache): Promi
   await fs.rename(tmp, target);
 }
 
+export async function removePeerFromAddressCache(root: string, name: string): Promise<boolean> {
+  const cache = await loadAddressCache(root);
+  if (!(name in cache.addresses)) return false;
+  delete cache.addresses[name];
+  await saveAddressCache(root, cache);
+  return true;
+}
+
 // ---------- peer URL normalisation ----------
 
 /**
