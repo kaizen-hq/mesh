@@ -324,7 +324,7 @@ export async function runPipeline(
   } catch (e) {
     run.status = "failed";
     run.completed_at = new Date().toISOString();
-    await saveRun(root, run);
+    await saveRun(root, run).catch(() => {}); // best-effort; always re-throw the original error
     opts.onRunUpdate?.(run);
     throw e;
   }

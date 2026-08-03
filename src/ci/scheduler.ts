@@ -161,7 +161,7 @@ export async function onManualRun(
   // Always persist the run on the originating node so CiStarted/CiCompleted
   // updates from the runner are applied even when the run was assigned remotely.
   state.ci.setRun(run);
-  void saveRun(state.root, run);
+  void saveRun(state.root, run).catch(() => {});
 
   await assignWithFallback(state, rankedPeers, run, pipeline, trigger);
 }
@@ -218,7 +218,7 @@ export async function onRefUpdate(
   // Always persist the run on the originating node so CiStarted/CiCompleted
   // updates from the runner are applied even when the run was assigned remotely.
   state.ci.setRun(run);
-  void saveRun(state.root, run);
+  void saveRun(state.root, run).catch(() => {});
 
   await assignWithFallback(state, rankedPeers, run, pipeline, trigger);
 }
@@ -239,7 +239,7 @@ async function assignWithFallback(
       // shows the correct runner before CiStarted arrives (or if it never does).
       run.runner = peer;
       state.ci.setRun(run);
-      void saveRun(state.root, run);
+      void saveRun(state.root, run).catch(() => {});
       state.notifyCiRunChanged(run.repo);
       // Store context so we can fall back to local if the peer declines.
       state.ci.setPendingAssignment(run.run_id, { pipeline, trigger });
