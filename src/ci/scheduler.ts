@@ -234,7 +234,17 @@ async function assignWithFallback(
 ): Promise<void> {
   for (const peer of rankedPeers.slice(0, MAX_ASSIGNMENT_ATTEMPTS)) {
     console.log(`[ci] assigning run ${run.run_id} to peer ${peer}`);
-    if (await sendAssignment(state, peer, run, pipeline, trigger)) return;
+    if (await sendAssignment(state, peer, run, pipeline, trigger)) {
+      // Reflect the assigned peer in the run record immediately so the UI
+      // shows the correct runner before CiStarted arrives (or if it never does).
+      run.runner = peer;
+      state.ci.setRun(run);
+      void saveRun(state.root, run);
+      state.notifyCiRunChanged(run.repo);
+      // Store context so we can fall back to local if the peer declines.
+      state.ci.setPendingAssignment(run.run_id, { pipeline, trigger });
+      return;
+    }
   }
   if (rankedPeers.length === 0) {
     console.log(`[ci] no peer runner available, running ${run.run_id} locally`);
@@ -320,7 +330,7 @@ export async function resolveShaviaIPeers(
   }
 }
 
-function scheduleLocalRun(state: SchedulerCtx, pipeline: Pipeline, run: PipelineRun): void {
+export function scheduleLocalRun(state: SchedulerCtx, pipeline: Pipeline, run: PipelineRun): void {
   state.ci.setRun(run);
   state.notifyCiRunChanged(run.repo);
   void runLocalPipeline(state, pipeline, run).catch((e) => {

@@ -137,6 +137,24 @@ async function handleInboundCiFrame(
 
 function handleCiRunUpdate(state: PeerLinkCtx, msg: import("./proto.ts").CiMessage): void {
   switch (msg.type) {
+    case "CiAccepted": {
+      // Peer confirmed it will run the job; no longer need fallback context.
+      state.ci.deletePendingAssignment(msg.run_id);
+      break;
+    }
+    case "CiDeclined": {
+      console.log(`[ci] run ${msg.run_id} declined by ${msg.runner}: ${msg.reason}`);
+      const pending = state.ci.getPendingAssignment(msg.run_id);
+      state.ci.deletePendingAssignment(msg.run_id);
+      const run = state.ci.getRun(msg.run_id);
+      if (pending && run) {
+        console.log(`[ci] falling back to local run for ${msg.run_id}`);
+        run.runner = state.config.self.name;
+        state.ci.setRun(run);
+        scheduler.scheduleLocalRun(state, pending.pipeline, run);
+      }
+      break;
+    }
     case "CiStarted": {
       const run = state.ci.getRun(msg.run_id);
       if (run) {

@@ -8,11 +8,19 @@ import type {
   LogBuffer,
   CronClaim,
   NodeCapabilities,
+  Pipeline,
+  TriggerKind,
 } from "./types.ts";
 import { emptyCiState } from "./types.ts";
 
+export interface PendingAssignment {
+  pipeline: Pipeline;
+  trigger: TriggerKind;
+}
+
 export class CiDomain {
   private state: CiState = emptyCiState();
+  private pendingAssignments: Map<string, PendingAssignment> = new Map();
   secrets: Record<string, string> = {};
   capabilities: NodeCapabilities | null = null;
 
@@ -28,6 +36,20 @@ export class CiDomain {
 
   allRuns(): PipelineRun[] {
     return [...this.state.runs.values()];
+  }
+
+  // ---------- pending assignments (for decline fallback) ----------
+
+  setPendingAssignment(runId: string, ctx: PendingAssignment): void {
+    this.pendingAssignments.set(runId, ctx);
+  }
+
+  getPendingAssignment(runId: string): PendingAssignment | undefined {
+    return this.pendingAssignments.get(runId);
+  }
+
+  deletePendingAssignment(runId: string): void {
+    this.pendingAssignments.delete(runId);
   }
 
   // ---------- log buffers ----------
