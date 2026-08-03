@@ -599,6 +599,7 @@ async function handleGit(state: Daemon, req: Request, url: URL, server: any): Pr
     const after = await gitp.branchHeads(dir);
     const changes = repoStore.diffRefSnapshots(before, after);
     if (changes.length > 0) {
+      await gitp.ensureValidHead(dir);
       const local = state.repos.ensure(parsed.repo);
       const head = await gitp.headSha(dir);
       if (head) local.lastHead = head;

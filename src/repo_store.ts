@@ -201,6 +201,8 @@ export async function reconcileFromPeer(
     }
   }
 
+  if (advanced.length > 0) await git.ensureValidHead(dir);
+
   const local = state.repos.ensure(repo);
   local.setDivergencesForPeer(peer, divergent);
   return { advanced, divergent };

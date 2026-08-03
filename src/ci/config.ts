@@ -4,6 +4,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { Pipeline, JobDefinition } from "./types.ts";
+import * as git from "../git.ts";
 
 // ---------- mesh-ci.yml parser ----------
 
@@ -135,12 +136,17 @@ export async function loadPipeline(repoPath: string): Promise<Pipeline | null> {
 
 /** Load the pipeline config from a bare mirror repo via `git show`. */
 export async function loadPipelineFromMirror(mirrorDir: string): Promise<Pipeline | null> {
+  // Don't trust HEAD blindly — a mirror populated by fetch/update-ref (rather
+  // than a normal clone) can have HEAD dangling at a branch that was never
+  // created. Fall back to whatever the mirror's actual default branch is.
+  const ref = await git.readableHeadRef(mirrorDir);
+  if (!ref) return null; // mirror is empty — no branches at all
   const proc = Bun.spawn(
-    ["git", "show", "HEAD:.mesh/mesh-ci.yml"],
+    ["git", "show", `${ref}:.mesh/mesh-ci.yml`],
     { cwd: mirrorDir, stdout: "pipe", stderr: "pipe" },
   );
   const exit = await proc.exited;
-  if (exit !== 0) return null; // file absent or mirror empty
+  if (exit !== 0) return null; // file absent
   const src = await new Response(proc.stdout).text();
   return parsePipeline(src);
 }

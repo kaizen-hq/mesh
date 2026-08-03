@@ -171,6 +171,66 @@ export async function branchHeads(dir: string): Promise<Array<[string, string]>>
   return listRefs(dir, "refs/heads/");
 }
 
+async function symbolicHeadTarget(dir: string): Promise<string | null> {
+  const proc = Bun.spawn(["git", "symbolic-ref", "--quiet", "HEAD"], {
+    cwd: dir,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const out = await new Response(proc.stdout).text();
+  const status = await proc.exited;
+  if (status !== 0) return null;
+  const s = out.trim();
+  return s.length ? s : null;
+}
+
+async function setSymbolicHead(dir: string, ref: string): Promise<void> {
+  const exit = await Bun.spawn(["git", "symbolic-ref", "HEAD", ref], {
+    cwd: dir,
+    stdout: "pipe",
+    stderr: "pipe",
+  }).exited;
+  if (exit !== 0) throw new Error(`git symbolic-ref HEAD ${ref} failed`);
+}
+
+// `git init --bare` points HEAD at whatever branch name the host's git is
+// configured to default to (often "master" unless init.defaultBranch is set),
+// regardless of which branch the repo actually uses. Mirror population here
+// never goes through a normal `git fetch` of HEAD — branches are written
+// directly via update-ref, or pushed to non-default branches — so a
+// mismatched default leaves HEAD dangling forever. That breaks anything that
+// reads "HEAD" literally, like `loadPipelineFromMirror`'s
+// `git show HEAD:.mesh/mesh-ci.yml`.
+async function resolveDefaultBranch(dir: string): Promise<string | null> {
+  const branches = await branchHeads(dir);
+  if (branches.length === 0) return null;
+  return (
+    branches.find(([name]) => name === "main")?.[0] ??
+    branches.find(([name]) => name === "master")?.[0] ??
+    branches[0]![0]
+  );
+}
+
+// Repoints a dangling HEAD at a real branch so it stays fixed for every
+// future reader, not just the caller. Best-effort; mutates the mirror.
+export async function ensureValidHead(dir: string): Promise<void> {
+  const target = await symbolicHeadTarget(dir);
+  if (target && (await refSha(dir, target)) !== null) return;
+
+  const branch = await resolveDefaultBranch(dir);
+  if (!branch) return;
+  await setSymbolicHead(dir, `refs/heads/${branch}`);
+}
+
+// Read-only equivalent for callers that just need *something* resolvable
+// right now (e.g. loadPipelineFromMirror) and can't assume ensureValidHead
+// has ever run against this mirror.
+export async function readableHeadRef(dir: string): Promise<string | null> {
+  if ((await refSha(dir, "HEAD")) !== null) return "HEAD";
+  const branch = await resolveDefaultBranch(dir);
+  return branch ? `refs/heads/${branch}` : null;
+}
+
 export async function refSha(dir: string, refName: string): Promise<string | null> {
   const proc = Bun.spawn(
     ["git", "rev-parse", "--verify", "--quiet", refName],

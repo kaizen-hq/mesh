@@ -48,7 +48,7 @@ jobs:
 async function setupMirror(root: string, repo: string): Promise<string> {
   const mirrorDir = path.join(root, "repos", `${repo}.git`);
   await fs.mkdir(mirrorDir, { recursive: true });
-  await $`git -C ${mirrorDir} init --bare`.quiet();
+  await $`git -C ${mirrorDir} init --bare --initial-branch=main`.quiet();
 
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "mesh-sched-work-"));
   try {
