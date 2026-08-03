@@ -20,6 +20,7 @@ import { buildZip, meshRoot, isCompiledBinary } from "./package_source.ts";
 import { runUpdate } from "./update.ts";
 import { loadSecretsConfig, detectTools, loadPipelineFromMirror } from "./ci/config.ts";
 import { checkCronSlots, type CronJobSpec } from "./ci/cron.ts";
+import { abandonStaleRuns } from "./ci/store.ts";
 import pkg from "../package.json" with { type: "json" };
 
 // Source-paradigm commands need the mesh source tree on the real filesystem,
@@ -313,6 +314,9 @@ async function cmdStart(root: string, args: Args) {
   const existingMirrors = await repoStore.scanMirrors(root);
   for (const name of existingMirrors) state.repos.ensure(name);
   await repoStore.ensureMirrors(state);
+
+  // Mark any runs left in "pending" or "running" from a previous daemon session as failed.
+  await abandonStaleRuns(root);
 
   // Load secrets and detect capabilities from runner config in mesh.toml
   state.ci.secrets = await loadSecretsConfig(root);

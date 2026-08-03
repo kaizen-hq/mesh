@@ -140,6 +140,37 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+// ---------- startup cleanup ----------
+
+// On daemon restart, any run that was "pending" or "running" will never
+// receive a CiCompleted frame — mark them "failed" so the UI doesn't show
+// them stuck as "running" forever.
+export async function abandonStaleRuns(root: string): Promise<void> {
+  const ciDir = path.join(root, "ci");
+  let repos: string[];
+  try {
+    const entries = await fs.readdir(ciDir, { withFileTypes: true });
+    repos = entries.filter((e) => e.isDirectory()).map((e) => e.name);
+  } catch (e: unknown) {
+    if ((e as { code?: string }).code === "ENOENT") return;
+    throw e;
+  }
+
+  for (const repo of repos) {
+    const idx = await loadRunsIndex(root, repo);
+    for (const entry of idx.runs) {
+      const run = await loadRun(root, repo, entry.run_id);
+      if (!run) continue;
+      if (run.status === "pending" || run.status === "running") {
+        run.status = "failed";
+        run.completed_at = run.completed_at ?? new Date().toISOString();
+        await saveRun(root, run);
+        console.log(`[ci] marked abandoned run ${run.run_id} (${repo}) as failed`);
+      }
+    }
+  }
+}
+
 // ---------- pruning ----------
 
 export async function pruneRuns(root: string, repo: string, maxRuns: number): Promise<void> {
