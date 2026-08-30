@@ -28,9 +28,7 @@ export async function saveRun(root: string, run: PipelineRun): Promise<void> {
   const dir = ciRunDir(root, run.repo, run.run_id);
   await fs.mkdir(dir, { recursive: true });
   const p = runJsonPath(root, run.repo, run.run_id);
-  const tmp = p + ".tmp";
-  await fs.writeFile(tmp, JSON.stringify(run, null, 2), "utf8");
-  await fs.rename(tmp, p);
+  await fs.writeFile(p, JSON.stringify(run, null, 2), "utf8");
   await updateRunsIndex(root, run);
 }
 
@@ -72,9 +70,7 @@ async function updateRunsIndex(root: string, run: PipelineRun): Promise<void> {
   filtered.sort((a, b) => (a.started_at > b.started_at ? -1 : a.started_at < b.started_at ? 1 : 0));
   const p = runsIndexPath(root, run.repo);
   await fs.mkdir(path.dirname(p), { recursive: true });
-  const tmp = p + ".tmp";
-  await fs.writeFile(tmp, JSON.stringify({ runs: filtered }, null, 2), "utf8");
-  await fs.rename(tmp, p);
+  await fs.writeFile(p, JSON.stringify({ runs: filtered }, null, 2), "utf8");
 }
 
 export async function listRuns(
@@ -185,7 +181,5 @@ export async function pruneRuns(root: string, repo: string, maxRuns: number): Pr
 
   const kept = idx.runs.slice(0, maxRuns);
   const p = runsIndexPath(root, repo);
-  const tmp = p + ".tmp";
-  await fs.writeFile(tmp, JSON.stringify({ runs: kept }, null, 2), "utf8");
-  await fs.rename(tmp, p);
+  await fs.writeFile(p, JSON.stringify({ runs: kept }, null, 2), "utf8");
 }
