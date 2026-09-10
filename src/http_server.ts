@@ -50,6 +50,64 @@ function isLoopback(ip: string): boolean {
   return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1" || ip === "localhost";
 }
 
+// ---------- fetch IP allowlist ----------
+// MESH_FETCH_ALLOW: comma-separated list of IPv4 CIDRs or exact IPs.
+// When unset or empty, git-upload-pack (clone/fetch) is open to all.
+// When set, only matching IPs (plus loopback) may clone/fetch.
+// Examples:
+//   MESH_FETCH_ALLOW=10.8.0.0/16
+//   MESH_FETCH_ALLOW=10.8.0.0/16,192.168.1.0/24,203.0.113.42
+
+// Bun can return IPv4-mapped IPv6 addresses (::ffff:x.x.x.x) — normalise to plain IPv4.
+function normalizeIp(ip: string): string {
+  if (ip.startsWith("::ffff:") && ip.slice(7).includes(".")) return ip.slice(7);
+  return ip;
+}
+
+function ipv4ToUint32(ip: string): number | null {
+  const parts = ip.split(".");
+  if (parts.length !== 4) return null;
+  let n = 0;
+  for (const p of parts) {
+    const v = Number(p);
+    if (!Number.isInteger(v) || v < 0 || v > 255) return null;
+    n = ((n << 8) | v) >>> 0;
+  }
+  return n;
+}
+
+function ipMatchesCidr(rawIp: string, cidr: string): boolean {
+  const ip = normalizeIp(rawIp);
+  if (!cidr.includes("/")) return ip === normalizeIp(cidr);
+
+  const slash = cidr.lastIndexOf("/");
+  const net = normalizeIp(cidr.slice(0, slash));
+  const bits = Number(cidr.slice(slash + 1));
+
+  const ipInt = ipv4ToUint32(ip);
+  const netInt = ipv4ToUint32(net);
+  if (ipInt !== null && netInt !== null && bits >= 0 && bits <= 32) {
+    const mask = bits === 0 ? 0 : (~0 << (32 - bits)) >>> 0;
+    return (ipInt & mask) === (netInt & mask);
+  }
+
+  // Non-IPv4 CIDR: fall back to exact match after normalisation.
+  return ip === net;
+}
+
+// Parsed once at startup; null means no restriction.
+const FETCH_ALLOWLIST: string[] | null = (() => {
+  const raw = process.env.MESH_FETCH_ALLOW;
+  if (!raw || !raw.trim()) return null;
+  return raw.split(",").map((s) => s.trim()).filter(Boolean);
+})();
+
+function isFetchAllowed(ip: string): boolean {
+  if (isLoopback(ip)) return true;
+  if (FETCH_ALLOWLIST === null) return true;
+  return FETCH_ALLOWLIST.some((cidr) => ipMatchesCidr(ip, cidr));
+}
+
 // Replay protection: reject any frame whose signature was already seen within
 // the last 5 minutes. The 64-byte ed25519 signature is unique per frame, so
 // it's a fine dedup key without needing a dedicated nonce field.
@@ -548,6 +606,16 @@ async function handleGit(state: Daemon, req: Request, url: URL, server: any): Pr
     const remoteIp = server?.requestIP?.(req)?.address ?? "";
     if (!isLoopback(remoteIp)) {
       return textResponse(403, "git push is only permitted from localhost");
+    }
+  }
+
+  // git-upload-pack (clone/fetch) is optionally restricted to an IP allowlist
+  // configured via MESH_FETCH_ALLOW (comma-separated CIDRs/IPs).
+  // When the env var is unset the path remains open (existing behaviour).
+  if (service === "git-upload-pack") {
+    const remoteIp = server?.requestIP?.(req)?.address ?? "";
+    if (!isFetchAllowed(remoteIp)) {
+      return textResponse(403, "git clone/fetch is not permitted from your IP address");
     }
   }
 

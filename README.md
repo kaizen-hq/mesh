@@ -142,6 +142,66 @@ git push mesh main
 
 `mesh url <repo>` prints the full remote URL if you need it.
 
+## Security
+
+### Git access model
+
+Mesh has two distinct git operations with different access rules:
+
+| Operation | Default | Configurable |
+|-----------|---------|--------------|
+| `git push` (receive-pack) | Loopback only (`127.0.0.1`, `::1`) | No — intentional; remote pushes would open an unauthenticated-push → malicious-pipeline → RCE chain |
+| `git clone` / `git fetch` (upload-pack) | Open to all | Yes — `MESH_FETCH_ALLOW` |
+
+### Restricting clone/fetch with an IP allowlist (`MESH_FETCH_ALLOW`)
+
+By default, anyone who can reach the mesh HTTP port can clone any repo. This is fine for internal networks or fully private deployments, but when you expose a mesh node to the public internet (a registered domain, a cloud VM, a k3s cluster with an ingress) you may want to restrict who can read your repos.
+
+Set `MESH_FETCH_ALLOW` to a comma-separated list of IPv4 CIDRs or exact IPs:
+
+```sh
+# Single VPN subnet
+MESH_FETCH_ALLOW=10.8.0.0/16
+
+# Multiple ranges and an exact IP
+MESH_FETCH_ALLOW=10.8.0.0/16,192.168.0.0/24,203.0.113.42
+```
+
+Loopback (`127.0.0.1`, `::1`) is always allowed regardless of the allowlist. Connections that don't match any entry receive a `403`. When `MESH_FETCH_ALLOW` is unset or empty, clone/fetch remains open (backward-compatible default).
+
+#### Kubernetes / k3s
+
+Pass the variable in your pod spec or deployment:
+
+```yaml
+env:
+  - name: MESH_FETCH_ALLOW
+    value: "10.0.0.0/8"
+```
+
+Or via a `ConfigMap`/`Secret` reference:
+
+```yaml
+env:
+  - name: MESH_FETCH_ALLOW
+    valueFrom:
+      secretKeyRef:
+        name: mesh-config
+        key: fetch_allow_cidrs
+```
+
+#### Common scenarios
+
+**VPN-only access.** Your team uses a VPN (WireGuard, Tailscale, OpenVPN) and all machines get IPs in `10.8.0.0/24`. Set `MESH_FETCH_ALLOW=10.8.0.0/24` — clones only work while connected to the VPN.
+
+**Shared hosting / cloud VM exposed to the internet.** You've registered a domain pointing at the node. Without an allowlist, any internet user can clone your repos. Set `MESH_FETCH_ALLOW` to your office CIDR or a known egress IP.
+
+**CI runners at a fixed IP.** Your external CI service (GitHub Actions, GitLab CI) uses a known egress IP range. Add those ranges so pipelines can fetch, but public browsers cannot.
+
+**Port-forward during development.** `kubectl port-forward` tunnels traffic through the Kubernetes API, so the pod sees the connection arriving from `127.0.0.1`. The push loopback restriction and the fetch allowlist (if set) both see the local end of the tunnel — connections via port-forward always appear to come from localhost and are therefore permitted regardless of `MESH_FETCH_ALLOW`.
+
+> Note: IPv6 CIDR ranges (e.g. `2001:db8::/32`) are not currently supported in the allowlist. Exact IPv6 addresses work fine. IPv4-mapped IPv6 addresses (`::ffff:x.x.x.x`) are automatically normalised to their IPv4 form before matching.
+
 ## CI/CD
 
 Mesh includes a distributed CI/CD system. Pipelines are defined per-repo and
