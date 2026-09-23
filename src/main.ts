@@ -51,7 +51,7 @@ const USAGE_TAIL = `  start [flags]                     Run the foreground serve
   add-peer <name> <pubkey> [addr]   add a peer to mesh.toml
   remove-peer <name>                remove a peer from mesh.toml
   invite [--addr HOST:PORT] [--ttl SECS]   print a pairing token for a teammate
-  join <token>                      accept a teammate's pairing token
+  join [--addr HOST:PORT] <token>   accept a teammate's pairing token
   update [--from PEER] [--ref TAG] [--force]  update to the latest release
   ci status [<repo>]                show recent pipeline runs
   ci run <repo> <ref>               manually trigger a pipeline
@@ -226,10 +226,11 @@ async function main() {
       case "join": {
         const token = args.positional[0];
         if (!token) {
-          console.error("usage: mesh join <token>");
+          console.error("usage: mesh join [--addr HOST:PORT] <token>");
           process.exit(1);
         }
-        return await sendAndPrint(root, { type: "join", token });
+        const addr = (args.flags["addr"] as string) || undefined;
+        return await sendAndPrint(root, { type: "join", token, addr });
       }
       case "update":
         return await runUpdate({

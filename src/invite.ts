@@ -163,6 +163,7 @@ export interface JoinRequest {
   joiner_name: string;
   joiner_pubkey: string; // "ed25519:..."
   signature: string; // base64
+  joiner_address?: string; // optional: joiner's own reachable address
 }
 
 export interface JoinResponse {
@@ -197,16 +198,19 @@ export async function buildJoinRequest(opts: {
   joinerName: string;
   joinerPubkey: Uint8Array;
   signingKey: Uint8Array;
+  joinerAddress?: string;
 }): Promise<JoinRequest> {
   const payload = joinSignedPayload(opts.nonce, opts.joinerName, opts.joinerPubkey);
   const sig = await ed.signAsync(payload, opts.signingKey);
-  return {
+  const req: JoinRequest = {
     version: INVITE_VERSION,
     nonce: base64Encode(opts.nonce),
     joiner_name: opts.joinerName,
     joiner_pubkey: encodePubkey(opts.joinerPubkey),
     signature: base64Encode(sig),
   };
+  if (opts.joinerAddress) req.joiner_address = opts.joinerAddress;
+  return req;
 }
 
 export async function verifyJoinRequest(req: JoinRequest): Promise<{

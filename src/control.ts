@@ -298,6 +298,7 @@ async function dispatch(state: ControlCtx, req: ControlRequest): Promise<Control
         joinerName: state.config.self.name,
         joinerPubkey: state.identity.publicKey,
         signingKey: state.identity.privateKey,
+        joinerAddress: req.addr ? String(req.addr) : undefined,
       });
       const { baseUrl } = normalizePeerUrl(parsed.address, state.config.transport.tls);
       let resp: JoinResponse;

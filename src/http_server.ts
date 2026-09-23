@@ -328,16 +328,20 @@ async function handleJoinPost(state: Daemon, req: Request): Promise<Response> {
   void savePendingInvites(state.root, state.pendingInvites).catch(() => {});
 
   const cfgPath = path.join(state.root, "mesh.toml");
+  const joinerAddresses = body.joiner_address ? [body.joiner_address] : [];
   try {
     await addPeerToConfig(cfgPath, {
       name: verified.joinerName,
       pubkey: encodePubkey(verified.joinerPubkey),
-      addresses: [],
+      addresses: joinerAddresses,
     });
     const next = await loadConfig(cfgPath);
     state.reloadConfig(next);
   } catch (e) {
     return jsonResponse(500, { ok: false, error: `failed to update mesh.toml: ${(e as Error).message}` });
+  }
+  if (body.joiner_address) {
+    await state.recordPeerAddress(verified.joinerName, body.joiner_address).catch(() => {});
   }
 
   const resp: JoinResponse = {
