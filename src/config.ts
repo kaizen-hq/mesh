@@ -181,6 +181,107 @@ async function writeDocAtomic(file: string, doc: RawConfigDoc): Promise<void> {
   await fs.rename(tmp, file);
 }
 
+// ---------- mesh.toml config set/get ----------
+
+type FieldType = "string" | "boolean" | "number" | "string[]";
+
+const CONFIG_SCHEMA: Record<string, Record<string, FieldType>> = {
+  self: {
+    name: "string",
+    peer_port: "number",
+  },
+  transport: {
+    tls: "boolean",
+    poll_secs: "number",
+  },
+  runner: {
+    enabled: "boolean",
+    execution_modes: "string[]",
+    labels: "string[]",
+    max_concurrent_jobs: "number",
+    workdir: "string",
+    tools: "string[]",
+    env_passthrough: "string[]",
+    log_stream_interval_ms: "number",
+    max_worktree_age_minutes: "number",
+    max_worktree_disk_mb: "number",
+    log_retention_runs: "number",
+  },
+};
+
+function coerceConfigValue(raw: string, type: FieldType, key: string): unknown {
+  switch (type) {
+    case "string":
+      return raw;
+    case "number": {
+      const n = Number(raw);
+      if (!Number.isFinite(n)) throw new Error(`${key}: expected a number, got "${raw}"`);
+      return n;
+    }
+    case "boolean": {
+      if (raw === "true" || raw === "1" || raw === "yes") return true;
+      if (raw === "false" || raw === "0" || raw === "no") return false;
+      throw new Error(`${key}: expected true/false/1/0/yes/no, got "${raw}"`);
+    }
+    case "string[]": {
+      const trimmed = raw.trim();
+      if (trimmed === "" || trimmed === "[]") return [];
+      if (trimmed.startsWith("[")) {
+        try {
+          const parsed = JSON.parse(trimmed);
+          if (Array.isArray(parsed)) return parsed.map(String);
+        } catch { /* fall through to CSV */ }
+      }
+      return trimmed.split(",").map((s) => s.trim()).filter(Boolean);
+    }
+  }
+}
+
+/**
+ * Set a single config value in mesh.toml by dotted key path (e.g. "runner.labels").
+ * Accepts comma-separated lists for array fields and true/false for booleans.
+ */
+export async function setConfigValue(file: string, keyPath: string, rawValue: string): Promise<void> {
+  const dot = keyPath.indexOf(".");
+  if (dot === -1) {
+    const sections = Object.keys(CONFIG_SCHEMA).join(", ");
+    throw new Error(`key must be section.field (e.g. runner.labels) — valid sections: ${sections}`);
+  }
+  const section = keyPath.slice(0, dot);
+  const field = keyPath.slice(dot + 1);
+
+  const sectionSchema = CONFIG_SCHEMA[section];
+  if (!sectionSchema) {
+    throw new Error(`unknown config section "${section}" — valid: ${Object.keys(CONFIG_SCHEMA).join(", ")}`);
+  }
+  const fieldType = sectionSchema[field];
+  if (!fieldType) {
+    throw new Error(`unknown field "${keyPath}" — valid fields for [${section}]: ${Object.keys(sectionSchema).join(", ")}`);
+  }
+
+  const coerced = coerceConfigValue(rawValue, fieldType, keyPath);
+  const doc = await readDoc(file);
+  (doc as Record<string, unknown>)[section] ??= {};
+  ((doc as Record<string, unknown>)[section] as Record<string, unknown>)[field] = coerced;
+  await writeDocAtomic(file, doc);
+}
+
+/**
+ * Get a single config value from mesh.toml by dotted key path.
+ * Returns undefined if the section or field is not present in the file.
+ */
+export async function getConfigValue(file: string, keyPath: string): Promise<unknown> {
+  const dot = keyPath.indexOf(".");
+  if (dot === -1) {
+    throw new Error(`key must be section.field (e.g. runner.labels)`);
+  }
+  const section = keyPath.slice(0, dot);
+  const field = keyPath.slice(dot + 1);
+  const doc = await readDoc(file);
+  const sec = (doc as Record<string, unknown>)[section] as Record<string, unknown> | undefined;
+  return sec?.[field];
+}
+
 /** Add (or update) a peer entry in mesh.toml. Returns true if the file changed. */
 export async function addPeerToConfig(
   file: string,

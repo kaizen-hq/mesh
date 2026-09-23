@@ -9,7 +9,7 @@ import * as os from "node:os";
 import * as toml from "./toml.ts";
 import { defaultRoot } from "./config.ts";
 import { Daemon } from "./daemon.ts";
-import { loadConfig, seedConfig } from "./config.ts";
+import { loadConfig, seedConfig, setConfigValue, getConfigValue } from "./config.ts";
 import { loadOrCreate } from "./identity.ts";
 import * as control from "./control.ts";
 import * as httpServer from "./http_server.ts";
@@ -52,6 +52,8 @@ const USAGE_TAIL = `  start [flags]                     Run the foreground serve
   remove-peer <name>                remove a peer from mesh.toml
   invite [--addr HOST:PORT] [--ttl SECS]   print a pairing token for a teammate
   join [--addr HOST:PORT] <token>   accept a teammate's pairing token
+  config set <section.key> <value>  set a mesh.toml value (no daemon needed)
+  config get <section.key>          print a mesh.toml value
   update [--from PEER] [--ref TAG] [--force]  update to the latest release
   ci status [<repo>]                show recent pipeline runs
   ci run <repo> <ref>               manually trigger a pipeline
@@ -232,6 +234,8 @@ async function main() {
         const addr = (args.flags["addr"] as string) || undefined;
         return await sendAndPrint(root, { type: "join", token, addr });
       }
+      case "config":
+        return await cmdConfig(root, args);
       case "update":
         return await runUpdate({
           root,
@@ -287,6 +291,60 @@ async function cmdSsl(root: string) {
   const key = `http.https://localhost:${port}.sslVerify`;
   await $`git config --global ${key} false`;
   console.log(`set ${key} = false`);
+}
+
+async function cmdConfig(root: string, args: Args) {
+  const sub = args.positional[0];
+  const cfgPath = path.join(root, "mesh.toml");
+
+  if (sub === "set") {
+    const keyPath = args.positional[1];
+    const value = args.positional[2];
+    if (!keyPath || value === undefined) {
+      console.error("usage: mesh config set <section.key> <value>");
+      console.error("  e.g.  mesh config set runner.labels 'prod,gpu'");
+      console.error("  e.g.  mesh config set runner.enabled false");
+      console.error("  e.g.  mesh config set self.name my-pod");
+      process.exit(1);
+    }
+    await setConfigValue(cfgPath, keyPath, value);
+    console.log(`set ${keyPath} = ${value}`);
+    await control.sendRequest(root, { type: "reload" }).catch(() => {});
+    return;
+  }
+
+  if (sub === "get") {
+    const keyPath = args.positional[1];
+    if (!keyPath) {
+      console.error("usage: mesh config get <section.key>");
+      process.exit(1);
+    }
+    const val = await getConfigValue(cfgPath, keyPath);
+    if (val === undefined) {
+      console.log("(not set)");
+    } else if (Array.isArray(val)) {
+      console.log(val.join(","));
+    } else {
+      console.log(String(val));
+    }
+    return;
+  }
+
+  console.error("usage: mesh config set|get <section.key> [value]");
+  console.error("");
+  console.error("Settable fields:");
+  console.error("  self.name                  string");
+  console.error("  self.peer_port             number");
+  console.error("  transport.tls              boolean");
+  console.error("  transport.poll_secs        number");
+  console.error("  runner.enabled             boolean");
+  console.error("  runner.execution_modes     comma-separated list");
+  console.error("  runner.labels              comma-separated list");
+  console.error("  runner.max_concurrent_jobs number");
+  console.error("  runner.workdir             string");
+  console.error("  runner.tools               comma-separated list");
+  console.error("  runner.env_passthrough     comma-separated list");
+  process.exit(1);
 }
 
 function cmdUrl(repo: string | undefined) {
