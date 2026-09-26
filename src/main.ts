@@ -449,7 +449,6 @@ function printResponse(resp: control.ControlResponse) {
     case "status":
       console.log(`self:        ${resp.name}`);
       console.log(`https:       ${resp.listen}`);
-      console.log(`config hash: ${resp.config_hash}`);
       console.log();
       printPeers(resp.peers as unknown[]);
       console.log();
@@ -472,18 +471,12 @@ function printPeers(peers: unknown[]) {
     return;
   }
   console.log("peers:");
-  for (const p of peers as Array<{ name: string; address: string | null; reachable: boolean; last_heartbeat_secs: number | null; config_hash_match: boolean | null }>) {
+  for (const p of peers as Array<{ name: string; address: string | null; reachable: boolean; last_heartbeat_secs: number | null }>) {
     const hb = p.last_heartbeat_secs == null ? "never" : `${p.last_heartbeat_secs}s ago`;
     const addr = p.address ?? "(no address)";
     const reach = p.reachable ? "up" : "down";
-    const drift =
-      p.config_hash_match == null
-        ? "config: ?"
-        : p.config_hash_match
-          ? "config: ok"
-          : "config: DRIFT";
     console.log(
-      `  ${p.name.padEnd(14)} ${reach.padEnd(4)} ${addr.padEnd(22)} hb ${hb.padEnd(10)} ${drift}`,
+      `  ${p.name.padEnd(14)} ${reach.padEnd(4)} ${addr.padEnd(22)} hb ${hb}`,
     );
   }
 }

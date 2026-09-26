@@ -12,7 +12,6 @@ export class PeerEntry {
   lastHeartbeat: number | null = null;
   lastPostOk: number | null = null;
   lastPostSeen: number | null = null;
-  lastConfigHash: string | null = null;
   lastIssueSyncMs: number | null = null; // epoch ms of last successful issue full-sync pull
   lastCiSyncMs: number | null = null;    // epoch ms of last successful CI runs full-sync pull
   capabilities: NodeCapabilities | null = null;
@@ -33,17 +32,17 @@ export class PeerEntry {
     this.addresses = [addr, ...this.addresses.filter((a) => a !== addr)];
     return true;
   }
-  noteHeartbeat(addr: string | null, cfgHash: string | null): boolean {
+  noteHeartbeat(addr: string | null): boolean {
     this.lastHeartbeat = Date.now();
     let changed = false;
     if (addr != null) changed = this.addAddress(addr);
-    if (cfgHash != null) this.lastConfigHash = cfgHash;
     return changed;
   }
 }
 
 export class PeerRegistry {
   private peers: Map<string, PeerEntry> = new Map();
+  private pubkeys: Map<string, string> = new Map(); // name → pubkey string (ed25519:...)
   private addressCache: AddressCache = { addresses: {} };
   private root: string;
 
@@ -64,6 +63,7 @@ export class PeerRegistry {
         ? [...p.addresses, ...cached.filter((a) => !p.addresses.includes(a))]
         : [...cached];
       registry.peers.set(p.name, entry);
+      registry.pubkeys.set(p.name, p.pubkey);
     }
     return registry;
   }
@@ -80,17 +80,60 @@ export class PeerRegistry {
     return this.peers.entries();
   }
 
+  /** Look up a peer's pubkey string. Returns undefined for unknown peers. */
+  getPubkey(name: string): string | undefined {
+    return this.pubkeys.get(name);
+  }
+
+  /**
+   * Add a peer learned via PeerList introduction. In-memory only — never
+   * written to mesh.toml. If the peer is already known, only addresses are
+   * updated (existing pubkey from config is authoritative).
+   */
+  addIntroduced(name: string, pubkey: string, addresses: string[], introducedBy: string): void {
+    if (this.peers.has(name)) {
+      const entry = this.peers.get(name)!;
+      for (const addr of addresses) entry.addAddress(addr);
+      return;
+    }
+    console.log(`peer ${name} introduced by ${introducedBy} — holding in memory, not written to mesh.toml`);
+    const entry = new PeerEntry();
+    entry.addresses = [...addresses];
+    this.peers.set(name, entry);
+    this.pubkeys.set(name, pubkey);
+  }
+
+  /**
+   * Returns all known peers (excluding the given name) with their pubkeys and
+   * addresses, suitable for building a PeerList message payload.
+   */
+  allPeers(excludeName: string): Array<{ name: string; pubkey: string; addresses: string[] }> {
+    const result: Array<{ name: string; pubkey: string; addresses: string[] }> = [];
+    for (const [name, entry] of this.peers) {
+      if (name === excludeName) continue;
+      const pubkey = this.pubkeys.get(name);
+      if (!pubkey) continue;
+      result.push({ name, pubkey, addresses: [...entry.addresses] });
+    }
+    return result;
+  }
+
   /** Add peers from config that are not yet tracked. Skips self and existing entries. */
   refresh(config: Config): void {
     for (const p of config.peers) {
       if (p.name === config.self.name) continue;
-      if (this.peers.has(p.name)) continue;
+      if (this.peers.has(p.name)) {
+        // Always keep config pubkey authoritative even if peer was previously introduced.
+        this.pubkeys.set(p.name, p.pubkey);
+        continue;
+      }
       const entry = new PeerEntry();
       const cached = this.addressCache.addresses[p.name] ?? [];
       entry.addresses = p.addresses.length > 0
         ? [...p.addresses, ...cached.filter((a) => !p.addresses.includes(a))]
         : [...cached];
       this.peers.set(p.name, entry);
+      this.pubkeys.set(p.name, p.pubkey);
     }
   }
 

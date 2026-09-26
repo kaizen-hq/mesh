@@ -15,7 +15,6 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     peers: [],
     transport: { tls: false, poll_secs: 10 },
     runner: DEFAULT_RUNNER,
-    raw_hash: "abc123",
     source_path: "/tmp/mesh.toml",
     ...overrides,
   };
@@ -246,5 +245,106 @@ describe("PeerRegistry.recordAddress()", () => {
     const registry = await PeerRegistry.create(root, config);
     await registry.recordAddress("bob", "http://bob:7979");
     expect(registry.currentAddressCache().addresses["bob"]).toContain("http://bob:7979");
+  });
+});
+
+// ---------- getPubkey ----------
+
+describe("PeerRegistry.getPubkey()", () => {
+  it("returns the pubkey for a config peer", async () => {
+    const root = await makeTmpRoot();
+    const config = makeConfig({
+      peers: [{ name: "bob", pubkey: "ed25519:BBB", addresses: [] }],
+    });
+    const registry = await PeerRegistry.create(root, config);
+    expect(registry.getPubkey("bob")).toBe("ed25519:BBB");
+  });
+
+  it("returns undefined for an unknown peer", async () => {
+    const root = await makeTmpRoot();
+    const registry = await PeerRegistry.create(root, makeConfig());
+    expect(registry.getPubkey("nobody")).toBeUndefined();
+  });
+
+  it("returns undefined for self (self is excluded from the peer map)", async () => {
+    const root = await makeTmpRoot();
+    const config = makeConfig({
+      peers: [{ name: "alice", pubkey: "ed25519:AAA", addresses: [] }],
+    });
+    const registry = await PeerRegistry.create(root, config);
+    expect(registry.getPubkey("alice")).toBeUndefined();
+  });
+});
+
+// ---------- addIntroduced ----------
+
+describe("PeerRegistry.addIntroduced()", () => {
+  it("adds an introduced peer to the registry", async () => {
+    const root = await makeTmpRoot();
+    const registry = await PeerRegistry.create(root, makeConfig());
+    registry.addIntroduced("carol", "ed25519:CCC", ["http://carol:7979"], "bob");
+    expect(registry.has("carol")).toBe(true);
+    expect(registry.getPubkey("carol")).toBe("ed25519:CCC");
+    expect(registry.get("carol")!.addresses).toContain("http://carol:7979");
+  });
+
+  it("does not overwrite an existing config peer's pubkey", async () => {
+    const root = await makeTmpRoot();
+    const config = makeConfig({
+      peers: [{ name: "bob", pubkey: "ed25519:BBB", addresses: [] }],
+    });
+    const registry = await PeerRegistry.create(root, config);
+    registry.addIntroduced("bob", "ed25519:EVIL", ["http://evil:7979"], "attacker");
+    expect(registry.getPubkey("bob")).toBe("ed25519:BBB");
+  });
+
+  it("updates addresses when the peer is already known", async () => {
+    const root = await makeTmpRoot();
+    const config = makeConfig({
+      peers: [{ name: "bob", pubkey: "ed25519:BBB", addresses: [] }],
+    });
+    const registry = await PeerRegistry.create(root, config);
+    registry.addIntroduced("bob", "ed25519:BBB", ["http://bob-new:7979"], "carol");
+    expect(registry.get("bob")!.addresses).toContain("http://bob-new:7979");
+  });
+});
+
+// ---------- allPeers ----------
+
+describe("PeerRegistry.allPeers()", () => {
+  it("returns all peers with their pubkeys and addresses", async () => {
+    const root = await makeTmpRoot();
+    const config = makeConfig({
+      peers: [
+        { name: "bob", pubkey: "ed25519:BBB", addresses: ["http://bob:7979"] },
+        { name: "carol", pubkey: "ed25519:CCC", addresses: [] },
+      ],
+    });
+    const registry = await PeerRegistry.create(root, config);
+    const all = registry.allPeers("alice");
+    expect(all).toHaveLength(2);
+    expect(all.find((p) => p.name === "bob")?.pubkey).toBe("ed25519:BBB");
+  });
+
+  it("excludes the named peer from the result", async () => {
+    const root = await makeTmpRoot();
+    const config = makeConfig({
+      peers: [
+        { name: "bob", pubkey: "ed25519:BBB", addresses: [] },
+        { name: "carol", pubkey: "ed25519:CCC", addresses: [] },
+      ],
+    });
+    const registry = await PeerRegistry.create(root, config);
+    const all = registry.allPeers("bob");
+    expect(all.find((p) => p.name === "bob")).toBeUndefined();
+    expect(all.find((p) => p.name === "carol")).toBeDefined();
+  });
+
+  it("includes introduced peers", async () => {
+    const root = await makeTmpRoot();
+    const registry = await PeerRegistry.create(root, makeConfig());
+    registry.addIntroduced("carol", "ed25519:CCC", ["http://carol:7979"], "bob");
+    const all = registry.allPeers("alice");
+    expect(all.find((p) => p.name === "carol")?.pubkey).toBe("ed25519:CCC");
   });
 });

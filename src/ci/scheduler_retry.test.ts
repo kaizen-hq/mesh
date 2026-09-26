@@ -102,7 +102,6 @@ async function makeCtx(root: string, peerSpecs: PeerSpec[]): Promise<SchedulerCt
       },
       transport: { tls: false, poll_secs: 30 },
       peers: [],
-      raw_hash: "",
       source_path: "",
     },
     ci,

@@ -5,7 +5,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import * as fs from "node:fs/promises";
 import * as toml from "./toml.ts";
-import { sha256Hex } from "./proto.ts";
+
 import type { RunnerConfig } from "./ci/types.ts";
 
 export interface SelfSection {
@@ -29,7 +29,6 @@ export interface Config {
   peers: PeerEntry[];
   transport: TransportSection;
   runner: RunnerConfig;
-  raw_hash: string;
   source_path: string;
 }
 
@@ -69,7 +68,6 @@ function warnUnknown(file: string, section: string, obj: Record<string, unknown>
 
 export async function loadConfig(file: string): Promise<Config> {
   const raw = await fs.readFile(file, "utf8");
-  const hash = sha256Hex(new TextEncoder().encode(raw));
   const t = toml.parse(raw) as Record<string, unknown>;
 
   warnUnknown(file, "", t, KNOWN_TOP_LEVEL);
@@ -144,7 +142,6 @@ export async function loadConfig(file: string): Promise<Config> {
     peers,
     transport,
     runner,
-    raw_hash: hash,
     source_path: file,
   };
 }

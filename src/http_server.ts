@@ -344,6 +344,10 @@ async function handleJoinPost(state: Daemon, req: Request): Promise<Response> {
     await state.recordPeerAddress(verified.joinerName, body.joiner_address).catch(() => {});
   }
 
+  // Fan out peer info: tell the joiner about existing peers, tell existing
+  // peers about the joiner. Fire-and-forget — join response is not blocked.
+  void peerLink.fanOutJoin(state, verified.joinerName);
+
   const resp: JoinResponse = {
     ok: true,
     inviter_name: state.config.self.name,
@@ -375,13 +379,13 @@ async function handleFramePost(state: Daemon, req: Request): Promise<Response> {
   if (frame.dest !== state.config.self.name) {
     return textResponse(400, "frame.dest does not match this peer");
   }
-  const peerEntry = state.config.peers.find((p) => p.name === frame.sender);
-  if (!peerEntry) {
+  const senderPubkeyStr = state.peers.getPubkey(frame.sender);
+  if (!senderPubkeyStr) {
     return textResponse(401, "unknown sender");
   }
   let pubkey: Uint8Array;
   try {
-    pubkey = decodePubkey(peerEntry.pubkey);
+    pubkey = decodePubkey(senderPubkeyStr);
   } catch {
     return textResponse(401, "unknown sender pubkey");
   }
@@ -687,9 +691,8 @@ function handleStatus(state: Daemon, views: Views): Response {
   const cfg = state.config;
   const myPub = state.identity.pubkeyString;
   const pubShort = myPub.startsWith("ed25519:") ? myPub.slice(8, 20) : myPub.slice(0, 12);
-  const cfgShort = cfg.raw_hash.slice(0, 10);
   const ctx = { config: cfg, peers: state.peers, repos: state.repos, ci: state.ci };
-  return new Response(renderStatusPageFull(views.status, ctx, pubShort, cfgShort), {
+  return new Response(renderStatusPageFull(views.status, ctx, pubShort), {
     status: 200,
     headers: { "content-type": "text/html; charset=utf-8" },
   });

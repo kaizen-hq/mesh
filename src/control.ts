@@ -139,7 +139,6 @@ async function dispatch(state: ControlCtx, req: ControlRequest): Promise<Control
         listen: "127.0.0.1:7979",
         peers: peerSummaries(state, now),
         repos: await repoSummaries(state, now),
-        config_hash: state.config.raw_hash,
       };
     }
     case "peers":
@@ -408,8 +407,6 @@ function peerSummaries(state: ControlCtx, now: number): unknown[] {
         last_heartbeat_secs: last,
         address: e?.addresses[0] ?? null,
         reachable: e?.isConnected() ?? false,
-        config_hash_match:
-          e?.lastConfigHash == null ? null : e.lastConfigHash === state.config.raw_hash,
       };
     });
 }

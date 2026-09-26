@@ -64,10 +64,12 @@ export async function handleInboundFrame(
   peerEntry?.notePostSeen();
   switch (msg.kind) {
     case "Hello":
-      peerEntry?.noteHeartbeat(null, msg.config_hash);
+      peerEntry?.noteHeartbeat(null);
+      // Reply with our known peer list so the sender can discover the rest of the mesh.
+      void sendPeerList(state, sender);
       break;
     case "Heartbeat":
-      peerEntry?.noteHeartbeat(null, msg.config_hash);
+      peerEntry?.noteHeartbeat(null);
       if (peerEntry && msg.capabilities) peerEntry.capabilities = msg.capabilities;
       for (const r of msg.repos) {
         if (!isValidRepoName(r.name)) {
@@ -104,6 +106,12 @@ export async function handleInboundFrame(
           console.warn(`CiFrame dispatch failed (sender=${sender}):`, (e as Error).message);
         }
       })();
+      break;
+    case "PeerList":
+      for (const p of msg.peers) {
+        if (p.name === state.config.self.name) continue;
+        state.peers.addIntroduced(p.name, p.pubkey, p.addresses, sender);
+      }
       break;
   }
 }
@@ -333,6 +341,50 @@ async function sendTo(state: PeerLinkCtx, peer: string, frame: Frame): Promise<v
   state.outbound.enqueue(peer, frame);
 }
 
+// ---------- peer discovery ----------
+
+async function sendPeerList(state: PeerLinkCtx, dest: string): Promise<void> {
+  const me = state.config.self.name;
+  const peers = state.peers.allPeers(me).filter((p) => p.name !== dest);
+  if (peers.length === 0) return;
+  const msg: Message = { kind: "PeerList", peers };
+  try {
+    const frame = await signFrame(me, dest, msg, state.identity.privateKey);
+    await sendTo(state, dest, frame);
+  } catch (e) {
+    console.warn(`sendPeerList to ${dest} failed:`, (e as Error).message);
+  }
+}
+
+/**
+ * Called after a join is accepted. Fans out peer info in both directions:
+ * - Sends the joiner a list of all existing peers.
+ * - Sends each existing peer a list containing just the joiner.
+ */
+export async function fanOutJoin(state: PeerLinkCtx, joinerName: string): Promise<void> {
+  const me = state.config.self.name;
+
+  // Tell the joiner about all peers we know (excluding self and the joiner).
+  await sendPeerList(state, joinerName);
+
+  // Tell each existing peer about the joiner.
+  const joinerEntry = state.peers.get(joinerName);
+  const joinerPubkey = state.peers.getPubkey(joinerName);
+  if (!joinerEntry || !joinerPubkey) return;
+
+  const joinerInfo = [{ name: joinerName, pubkey: joinerPubkey, addresses: [...joinerEntry.addresses] }];
+  for (const p of state.config.peers) {
+    if (p.name === me || p.name === joinerName) continue;
+    const msg: Message = { kind: "PeerList", peers: joinerInfo };
+    try {
+      const frame = await signFrame(me, p.name, msg, state.identity.privateKey);
+      await sendTo(state, p.name, frame);
+    } catch (e) {
+      console.warn(`fanOutJoin PeerList to ${p.name} failed:`, (e as Error).message);
+    }
+  }
+}
+
 // ---------- retry loop ----------
 
 export async function runRetryLoop(state: PeerLinkCtx): Promise<void> {
@@ -406,7 +458,6 @@ export async function runHeartbeat(state: PeerLinkCtx, secs: number): Promise<vo
   while (true) {
     await sleep(intervalMs);
     const me = state.config.self.name;
-    const raw_hash = state.config.raw_hash;
     const repos = await repoStore.repoStatuses(state);
 
     for (const p of state.config.peers) {
@@ -414,7 +465,6 @@ export async function runHeartbeat(state: PeerLinkCtx, secs: number): Promise<vo
       const msg: Message = {
         kind: "Heartbeat",
         name: me,
-        config_hash: raw_hash,
         repos,
         capabilities: state.ci.capabilities ?? undefined,
       };
@@ -437,7 +487,6 @@ export async function runInitialHello(state: PeerLinkCtx): Promise<void> {
     const msg: Message = {
       kind: "Hello",
       name: me,
-      config_hash: state.config.raw_hash,
       version: PROTOCOL_VERSION,
     };
     try {

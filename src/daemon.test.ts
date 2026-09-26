@@ -19,7 +19,6 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     peers: [],
     transport: { tls: false, poll_secs: 10 },
     runner: DEFAULT_RUNNER,
-    raw_hash: "abc123",
     source_path: "/tmp/mesh.toml",
     ...overrides,
   };
@@ -104,10 +103,10 @@ describe("Daemon.create()", () => {
 
 describe("Daemon.reloadConfig()", () => {
   it("updates config", async () => {
-    const daemon = await Daemon.create(await makeTmpRoot(), makeConfig({ raw_hash: "old" }), makeIdentity());
-    const next = makeConfig({ raw_hash: "new" });
+    const daemon = await Daemon.create(await makeTmpRoot(), makeConfig({ source_path: "/old" }), makeIdentity());
+    const next = makeConfig({ source_path: "/new" });
     daemon.reloadConfig(next);
-    expect(daemon.config.raw_hash).toBe("new");
+    expect(daemon.config.source_path).toBe("/new");
   });
 
   it("refreshes peers from the new config", async () => {

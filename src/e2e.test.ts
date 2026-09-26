@@ -42,7 +42,6 @@ async function startNode(
     peers: [{ name, pubkey: identity.pubkeyString, addresses: [] }, ...peers],
     transport: { tls: false, poll_secs: 10 },
     runner: DEFAULT_RUNNER,
-    raw_hash: "e2e-test",
     source_path: "/tmp/mesh.toml",
   };
   const daemon = await Daemon.create(root, config, identity);
@@ -111,7 +110,7 @@ describe("POST /mesh/frame — rejection", () => {
     const alice = await startNode("alice", aliceId, []);
     nodes.push(alice);
 
-    const frame = await signFrame("stranger", "alice", { kind: "Heartbeat", name: "stranger", config_hash: "x", repos: [] }, strangerIdId.privateKey);
+    const frame = await signFrame("stranger", "alice", { kind: "Heartbeat", name: "stranger", repos: [] }, strangerIdId.privateKey);
     const res = await postFrame(alice.baseUrl, frame);
     expect(res.status).toBe(401);
   });
@@ -126,7 +125,7 @@ describe("POST /mesh/frame — rejection", () => {
     nodes.push(alice);
 
     // bob sends a frame addressed to "carol", not "alice"
-    const frame = await signFrame("bob", "carol", { kind: "Heartbeat", name: "bob", config_hash: "x", repos: [] }, bobId.privateKey);
+    const frame = await signFrame("bob", "carol", { kind: "Heartbeat", name: "bob", repos: [] }, bobId.privateKey);
     const res = await postFrame(alice.baseUrl, frame);
     expect(res.status).toBe(400);
   });
@@ -139,7 +138,7 @@ describe("POST /mesh/frame — rejection", () => {
     ]);
     nodes.push(alice);
 
-    const frame = await signFrame("bob", "alice", { kind: "Heartbeat", name: "bob", config_hash: "x", repos: [] }, bobId.privateKey);
+    const frame = await signFrame("bob", "alice", { kind: "Heartbeat", name: "bob", repos: [] }, bobId.privateKey);
     // Tamper the signature
     frame.signature[0] ^= 0xff;
     const res = await postFrame(alice.baseUrl, frame);
@@ -158,7 +157,7 @@ describe("POST /mesh/frame — acceptance", () => {
     ]);
     nodes.push(alice);
 
-    const frame = await signFrame("bob", "alice", { kind: "Heartbeat", name: "bob", config_hash: "x", repos: [] }, bobId.privateKey);
+    const frame = await signFrame("bob", "alice", { kind: "Heartbeat", name: "bob", repos: [] }, bobId.privateKey);
     const res = await postFrame(alice.baseUrl, frame);
     expect(res.status).toBe(202);
   });
@@ -173,7 +172,7 @@ describe("POST /mesh/frame — acceptance", () => {
 
     expect(alice.daemon.peers.get("bob")!.isConnected()).toBe(false);
 
-    const frame = await signFrame("bob", "alice", { kind: "Heartbeat", name: "bob", config_hash: "x", repos: [] }, bobId.privateKey);
+    const frame = await signFrame("bob", "alice", { kind: "Heartbeat", name: "bob", repos: [] }, bobId.privateKey);
     await postFrame(alice.baseUrl, frame);
 
     expect(alice.daemon.peers.get("bob")!.isConnected()).toBe(true);
@@ -191,7 +190,7 @@ describe("replay protection", () => {
     ]);
     nodes.push(alice);
 
-    const frame = await signFrame("bob", "alice", { kind: "Heartbeat", name: "bob", config_hash: "x", repos: [] }, bobId.privateKey);
+    const frame = await signFrame("bob", "alice", { kind: "Heartbeat", name: "bob", repos: [] }, bobId.privateKey);
     const first = await postFrame(alice.baseUrl, frame);
     expect(first.status).toBe(202);
 
@@ -220,7 +219,6 @@ describe("two-node heartbeat exchange", () => {
     const frame = await signFrame("alice", "bob", {
       kind: "Heartbeat",
       name: "alice",
-      config_hash: alice.daemon.config.raw_hash,
       repos: [],
     }, aliceId.privateKey);
 
@@ -241,8 +239,8 @@ describe("two-node heartbeat exchange", () => {
     ]);
     nodes.push(alice, bob);
 
-    await postFrame(bob.baseUrl, await signFrame("alice", "bob", { kind: "Heartbeat", name: "alice", config_hash: "x", repos: [] }, aliceId.privateKey));
-    await postFrame(alice.baseUrl, await signFrame("bob", "alice", { kind: "Heartbeat", name: "bob", config_hash: "x", repos: [] }, bobId.privateKey));
+    await postFrame(bob.baseUrl, await signFrame("alice", "bob", { kind: "Heartbeat", name: "alice", repos: [] }, aliceId.privateKey));
+    await postFrame(alice.baseUrl, await signFrame("bob", "alice", { kind: "Heartbeat", name: "bob", repos: [] }, bobId.privateKey));
 
     expect(bob.daemon.peers.get("alice")!.isConnected()).toBe(true);
     expect(alice.daemon.peers.get("bob")!.isConnected()).toBe(true);

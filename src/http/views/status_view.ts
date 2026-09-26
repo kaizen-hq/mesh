@@ -28,15 +28,11 @@ export function renderStatusData(ctx: StatusViewCtx): string {
     const addr = entry?.addresses[0] ?? "(no address)";
     const reachable = entry?.isConnected() ?? false;
     const hb = entry?.lastHeartbeat ? `${Math.floor((now - entry.lastHeartbeat) / 1000)}s ago` : "never";
-    const drift =
-      entry?.lastConfigHash == null ? "?"
-      : entry.lastConfigHash === cfg.raw_hash ? "ok"
-      : "DRIFT";
     const cls = reachable ? "ok" : "down";
     const lbl = reachable ? "up" : "down";
-    peerRows += `<tr><td>${esc(p.name)}</td><td>${esc(addr)}</td><td><span class="${cls}">${lbl}</span></td><td>${esc(hb)}</td><td>${drift}</td></tr>`;
+    peerRows += `<tr><td>${esc(p.name)}</td><td>${esc(addr)}</td><td><span class="${cls}">${lbl}</span></td><td>${esc(hb)}</td></tr>`;
   }
-  if (!peerRows) peerRows = `<tr><td colspan="5"><em>(no peers configured)</em></td></tr>`;
+  if (!peerRows) peerRows = `<tr><td colspan="4"><em>(no peers configured)</em></td></tr>`;
 
   let repoRows = "";
   for (const name of [...repos.keys()].sort()) {
@@ -54,7 +50,7 @@ export function renderStatusData(ctx: StatusViewCtx): string {
   return `<div id="status-data">
 <h2>peers</h2>
 <table>
-  <thead><tr><th>name</th><th>address</th><th>status</th><th>last heartbeat</th><th>config</th></tr></thead>
+  <thead><tr><th>name</th><th>address</th><th>status</th><th>last heartbeat</th></tr></thead>
   <tbody>${peerRows}</tbody>
 </table>
 <h2>repos</h2>
@@ -80,12 +76,11 @@ function latestRunBadge(ci: CiDomain, repo: string, now: number): string {
 
 // ---------- full status page ----------
 
-/** pubkeyShort and cfgShort come from identity — the handler passes them in. */
+/** pubkeyShort comes from identity — the handler passes it in. */
 export function renderStatusPageFull(
   template: string,
   ctx: StatusViewCtx,
   pubkeyShort: string,
-  cfgShort: string,
 ): string {
   const cfg = ctx.config;
   const me = cfg.self.name;
@@ -94,7 +89,6 @@ export function renderStatusPageFull(
     me: esc(me),
     scheme: esc(scheme),
     pubkey_short: esc(pubkeyShort),
-    cfg_short: esc(cfgShort),
     status_data: renderStatusData(ctx),
   });
 }

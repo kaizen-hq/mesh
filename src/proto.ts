@@ -194,13 +194,11 @@ export type Message =
   | {
       kind: "Hello";
       name: string;
-      config_hash: string;
       version: number;
     }
   | {
       kind: "Heartbeat";
       name: string;
-      config_hash: string;
       repos: RepoStatus[];
       capabilities?: NodeCapabilities;
     }
@@ -216,6 +214,10 @@ export type Message =
   | {
       kind: "CiFrame";
       msg: CiMessage;
+    }
+  | {
+      kind: "PeerList";
+      peers: Array<{ name: string; pubkey: string; addresses: string[] }>;
     };
 
 // ---------- encode / decode Message (bincode-compatible) ----------
@@ -226,13 +228,11 @@ function encodeMessage(msg: Message): Uint8Array {
     case "Hello":
       e.variant(0);
       e.str(msg.name);
-      e.str(msg.config_hash);
       e.u32(msg.version);
       break;
     case "Heartbeat":
       e.variant(1);
       e.str(msg.name);
-      e.str(msg.config_hash);
       e.u64(msg.repos.length);
       for (const r of msg.repos) {
         e.str(r.name);
@@ -275,6 +275,16 @@ function encodeMessage(msg: Message): Uint8Array {
       e.variant(4);
       e.str(JSON.stringify(msg.msg));
       break;
+    case "PeerList":
+      e.variant(5);
+      e.u64(msg.peers.length);
+      for (const p of msg.peers) {
+        e.str(p.name);
+        e.str(p.pubkey);
+        e.u64(p.addresses.length);
+        for (const a of p.addresses) e.str(a);
+      }
+      break;
   }
   return e.finish();
 }
@@ -285,13 +295,11 @@ function decodeMessage(buf: Uint8Array): Message {
   switch (tag) {
     case 0: {
       const name = d.str();
-      const config_hash = d.str();
       const version = d.u32();
-      return { kind: "Hello", name, config_hash, version };
+      return { kind: "Hello", name, version };
     }
     case 1: {
       const name = d.str();
-      const config_hash = d.str();
       const repoCount = d.u64();
       const repos: RepoStatus[] = [];
       for (let i = 0; i < repoCount; i++) {
@@ -313,7 +321,7 @@ function decodeMessage(buf: Uint8Array): Message {
           capabilities = JSON.parse(d.str()) as import("./ci/types.ts").NodeCapabilities;
         }
       }
-      return { kind: "Heartbeat", name, config_hash, repos, capabilities };
+      return { kind: "Heartbeat", name, repos, capabilities };
     }
     case 2: {
       const repo = d.str();
@@ -331,6 +339,19 @@ function decodeMessage(buf: Uint8Array): Message {
     case 4: {
       const msg = JSON.parse(d.str()) as CiMessage;
       return { kind: "CiFrame", msg };
+    }
+    case 5: {
+      const count = d.u64();
+      const peers: Array<{ name: string; pubkey: string; addresses: string[] }> = [];
+      for (let i = 0; i < count; i++) {
+        const name = d.str();
+        const pubkey = d.str();
+        const addrCount = d.u64();
+        const addresses: string[] = [];
+        for (let j = 0; j < addrCount; j++) addresses.push(d.str());
+        peers.push({ name, pubkey, addresses });
+      }
+      return { kind: "PeerList", peers };
     }
     default:
       throw new Error(`unknown Message variant tag: ${tag}`);
@@ -445,7 +466,7 @@ export function decodePubkey(s: string): Uint8Array {
   return bytes;
 }
 
-// ---------- sha256 hex (used for config_hash) ----------
+// ---------- sha256 hex ----------
 
 export function sha256Hex(data: Uint8Array): string {
   const h = new Bun.CryptoHasher("sha256");
