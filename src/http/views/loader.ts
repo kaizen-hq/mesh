@@ -1,11 +1,12 @@
-// Loads all HTML templates from disk at daemon startup.
-// import.meta.dir resolves relative to this source file, so paths
-// are correct regardless of where the process is launched from.
+// Static imports so Bun embeds these files into the compiled binary.
+// fs.readFile against import.meta.dir doesn't work inside a Bun single-file
+// executable because /$bunfs/root/ is a virtual FS, not a real path.
 
-import * as fs from "node:fs/promises";
-import * as path from "node:path";
-
-const DIR = import.meta.dir;
+import css from "./shared.css" with { type: "text" };
+import status from "./status.html" with { type: "text" };
+import issues from "./issues.html" with { type: "text" };
+import ciPipelines from "./ci_pipelines.html" with { type: "text" };
+import ciRunDetail from "./ci_run_detail.html" with { type: "text" };
 
 export interface Views {
   css: string;
@@ -16,12 +17,5 @@ export interface Views {
 }
 
 export async function loadViews(): Promise<Views> {
-  const [css, status, issues, ciPipelines, ciRunDetail] = await Promise.all([
-    fs.readFile(path.join(DIR, "shared.css"), "utf8"),
-    fs.readFile(path.join(DIR, "status.html"), "utf8"),
-    fs.readFile(path.join(DIR, "issues.html"), "utf8"),
-    fs.readFile(path.join(DIR, "ci_pipelines.html"), "utf8"),
-    fs.readFile(path.join(DIR, "ci_run_detail.html"), "utf8"),
-  ]);
   return { css, status, issues, ciPipelines, ciRunDetail };
 }
