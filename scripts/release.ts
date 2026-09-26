@@ -24,8 +24,11 @@
 //   2. bump package.json version
 //   3. git add + commit "release vX.Y.Z"
 //   4. git tag vX.Y.Z
-//   5. bun run build      (compile the binary)
+//   5. bun run build      (compile the binary — local smoke-test)
 //   6. bun run package    (build mesh-src.zip)
+//
+// Pushing the tag triggers the release GitHub Action which builds platform
+// binaries for all targets and creates the GitHub release with all assets.
 
 import * as path from "node:path";
 import * as fs from "node:fs/promises";
@@ -104,6 +107,9 @@ console.log("built source zip");
 
 console.log(`\nrelease ${tag} ready. Push when you're satisfied:`);
 console.log(`  git push && git push --tags`);
+console.log(`\nThe release GitHub Action will then:`);
+console.log(`  - build platform binaries (linux-x64, linux-arm64, darwin-x64, darwin-arm64)`);
+console.log(`  - create the GitHub release with all assets attached`);
 
 // ---------- bump logic ----------
 
