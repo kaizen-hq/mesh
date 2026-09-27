@@ -526,6 +526,10 @@ function handleCiLogStream(state: Daemon, repo: string, runId: string): Response
           const data = JSON.stringify({ data: chunk });
           controller.enqueue(encoder.encode(`event: log-chunk\ndata: ${data}\n\n`));
         }
+        // Signal the client that the run is complete so it can close the
+        // EventSource and reload — without this the browser auto-reconnects
+        // and tailLog replays the full log from offset 0, causing duplicates.
+        controller.enqueue(encoder.encode("event: done\ndata: {}\n\n"));
       } catch { /* stream ended */ } finally {
         controller.close();
       }

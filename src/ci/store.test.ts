@@ -8,6 +8,7 @@ import {
   listRuns,
   appendLogChunk,
   readLog,
+  tailLog,
   pruneRuns,
   ciRunDir,
 } from "./store.ts";
@@ -134,5 +135,60 @@ describe("ciRunDir", () => {
   it("returns expected path", () => {
     const d = ciRunDir("/home/user/.mesh", "my-app", "run-001");
     expect(d).toBe("/home/user/.mesh/ci/my-app/run-001");
+  });
+});
+
+describe("tailLog", () => {
+  it("yields existing log content then stops when isDone returns true", async () => {
+    const run = makeRun();
+    await saveRun(tmpDir, run);
+    await appendLogChunk(tmpDir, run.repo, run.run_id, "line 1\nline 2\n");
+
+    const chunks: string[] = [];
+    for await (const chunk of tailLog(tmpDir, run.repo, run.run_id, 0, () => true)) {
+      chunks.push(chunk);
+    }
+    expect(chunks.join("")).toBe("line 1\nline 2\n");
+  });
+
+  it("does not re-emit content already yielded within the same call", async () => {
+    const run = makeRun();
+    await saveRun(tmpDir, run);
+    await appendLogChunk(tmpDir, run.repo, run.run_id, "first chunk\n");
+
+    let calls = 0;
+    const chunks: string[] = [];
+    // isDone returns false on the first check (so the loop continues), true on the second
+    for await (const chunk of tailLog(tmpDir, run.repo, run.run_id, 0, () => ++calls >= 2)) {
+      chunks.push(chunk);
+    }
+    const output = chunks.join("");
+    // "first chunk" must appear exactly once — offset tracking must prevent re-emission
+    expect(output.split("first chunk").length - 1).toBe(1);
+  });
+
+  it("yields all chunks written before isDone triggers, across multiple appends", async () => {
+    const run = makeRun();
+    await saveRun(tmpDir, run);
+    // Write two separate chunks up front (simulates log growing during a run)
+    await appendLogChunk(tmpDir, run.repo, run.run_id, "step-one\n");
+    await appendLogChunk(tmpDir, run.repo, run.run_id, "step-two\n");
+
+    const chunks: string[] = [];
+    // isDone is true immediately — all content should still be yielded before stopping
+    for await (const chunk of tailLog(tmpDir, run.repo, run.run_id, 0, () => true)) {
+      chunks.push(chunk);
+    }
+    const output = chunks.join("");
+    expect(output).toContain("step-one");
+    expect(output).toContain("step-two");
+  });
+
+  it("yields nothing and stops immediately when log is missing and isDone is true", async () => {
+    const chunks: string[] = [];
+    for await (const chunk of tailLog(tmpDir, "no-repo", "no-run", 0, () => true)) {
+      chunks.push(chunk);
+    }
+    expect(chunks).toHaveLength(0);
   });
 });

@@ -152,6 +152,10 @@ es.addEventListener('log-chunk', e => {
   pre.textContent += d.data;
   if (follow) pre.scrollTop = pre.scrollHeight;
 });
+es.addEventListener('done', () => {
+  es.close();
+  location.reload();
+});
 </script>`
     : `<pre class="log-viewer">${esc(log)}</pre>`;
 
