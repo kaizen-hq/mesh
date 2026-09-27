@@ -11,7 +11,7 @@ import * as gitp from "./git.ts";
 import * as peerLink from "./peer_link.ts";
 import { loadViews, type Views } from "./http/views/loader.ts";
 import { renderStatusData, renderStatusPageFull } from "./http/views/status_view.ts";
-import { renderBoardGridForRepo, renderBoardPage } from "./http/views/issues_view.ts";
+import { renderBoardGridForRepo, renderBoardPage, renderDetailPage } from "./http/views/issues_view.ts";
 import { renderCiPipelinesPage, renderCiRunDetailPage } from "./http/views/ci_view.ts";
 import { parsePage, parseSize, renderPagination } from "./http/views/helpers.ts";
 import {
@@ -749,7 +749,26 @@ function textResponse(status: number, body: string): Response {
   return new Response(body, { status, headers: { "content-type": "text/plain" } });
 }
 
+function wantsJson(req: Request): boolean {
+  return (req.headers.get("accept") ?? "").includes("application/json");
+}
+
 // ---------- Issues ----------
+
+function filterIssues(
+  all: issues.Issue[],
+  status: string | null,
+  label: string | null,
+): issues.Issue[] {
+  let result = all;
+  if (status === "open" || status === "closed" || status === "trashed") {
+    result = result.filter((i) => i.meta.status === status);
+  }
+  if (label) {
+    result = result.filter((i) => i.meta.labels.includes(label));
+  }
+  return result;
+}
 
 function authorShort(state: Daemon): string {
   const pub = state.identity.pubkeyString;
@@ -764,10 +783,11 @@ async function handleIssues(
   tail: string,
 ): Promise<Response> {
   const method = req.method;
+  const json = wantsJson(req);
 
   if (tail === "" || tail === "/") {
-    if (method === "GET") return handleIssueBoard(state, views, req, repo);
-    if (method === "POST") return handleIssueCreate(state, req, repo);
+    if (method === "GET") return json ? handleIssueBoardJson(state, req, repo) : handleIssueBoardHtml(state, views, req, repo);
+    if (method === "POST") return json ? handleIssueCreateJson(state, req, repo) : handleIssueCreateHtml(state, req, repo);
   }
   if (tail === "/events" && method === "GET") {
     return handleIssueEvents(repo);
@@ -783,6 +803,11 @@ async function handleIssues(
     if (action === "status") return handleIssueStatus(state, req, repo, id);
     return handleIssueOrder(state, req, repo, id);
   }
+  const detailMatch = /^\/([^/]+)$/.exec(tail);
+  if (detailMatch && method === "GET") {
+    const id = decodeURIComponent(detailMatch[1]!);
+    return json ? handleIssueDetailJson(state, repo, id) : handleIssueDetailHtml(state, repo, id);
+  }
   return textResponse(404, "not found");
 }
 
@@ -794,14 +819,41 @@ async function handleIssueAll(state: Daemon, repo: string): Promise<Response> {
   });
 }
 
-async function handleIssueBoard(state: Daemon, views: Views, req: Request, repo: string): Promise<Response> {
+async function issueBoardData(state: Daemon, req: Request, repo: string) {
   const url = new URL(req.url);
   const page = parsePage(url.searchParams.get("page"));
   const size = parseSize(url.searchParams.get("size"));
+  const statusFilter = url.searchParams.get("status");
+  const labelFilter = url.searchParams.get("label");
   const all = await issues.listIssues(state.root, repo);
-  const pageIssues = all.slice(page * size, (page + 1) * size);
+  const filtered = filterIssues(all, statusFilter, labelFilter);
+  return { page, size, filtered };
+}
+
+async function handleIssueBoardJson(state: Daemon, req: Request, repo: string): Promise<Response> {
+  const { filtered } = await issueBoardData(state, req, repo);
+  const list = filtered.map((i) => ({
+    id: i.meta.id,
+    title: i.meta.title,
+    status: i.meta.status,
+    labels: i.meta.labels,
+    author: i.meta.author,
+    created: i.meta.created,
+    updated: i.meta.updated,
+    order: i.meta.order,
+    comments: i.comments.length,
+  }));
+  return new Response(JSON.stringify(list), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+async function handleIssueBoardHtml(state: Daemon, views: Views, req: Request, repo: string): Promise<Response> {
+  const { page, size, filtered } = await issueBoardData(state, req, repo);
+  const pageIssues = filtered.slice(page * size, (page + 1) * size);
   const baseUrl = `/repos/${encodeURIComponent(repo)}/issues`;
-  const pagination = renderPagination(page, size, all.length, baseUrl);
+  const pagination = renderPagination(page, size, filtered.length, baseUrl);
   const me = state.config.self.name;
   return new Response(renderBoardPage(views.issues, me, repo, pageIssues, pagination), {
     status: 200,
@@ -813,19 +865,22 @@ async function handleIssueBoardFragment(state: Daemon, req: Request, repo: strin
   const url = new URL(req.url);
   const page = parsePage(url.searchParams.get("page"));
   const size = parseSize(url.searchParams.get("size"));
+  const statusFilter = url.searchParams.get("status");
+  const labelFilter = url.searchParams.get("label");
   const all = await issues.listIssues(state.root, repo);
-  const pageIssues = all.slice(page * size, (page + 1) * size);
+  const filtered = filterIssues(all, statusFilter, labelFilter);
+  const pageIssues = filtered.slice(page * size, (page + 1) * size);
   return new Response(renderBoardGridForRepo(pageIssues, repo), {
     status: 200,
     headers: { "content-type": "text/html; charset=utf-8" },
   });
 }
 
-async function handleIssueCreate(
+async function performIssueCreate(
   state: Daemon,
   req: Request,
   repo: string,
-): Promise<Response> {
+): Promise<{ issue: issues.Issue } | Response> {
   let form;
   try { form = await req.formData(); } catch {
     return textResponse(400, "expected form body");
@@ -850,7 +905,44 @@ async function handleIssueCreate(
   };
   peerLink.broadcastIssueEvent(state, event);
   notifyIssueChanged(repo);
-  return new Response("", { status: 303, headers: { Location: `/repos/${repo}/issues` } });
+  return { issue };
+}
+
+async function handleIssueCreateJson(state: Daemon, req: Request, repo: string): Promise<Response> {
+  const result = await performIssueCreate(state, req, repo);
+  if (result instanceof Response) return result;
+  const { issue } = result;
+  const issueUrl = `/repos/${encodeURIComponent(repo)}/issues/${encodeURIComponent(issue.meta.id)}`;
+  return new Response(JSON.stringify({ id: issue.meta.id }), {
+    status: 201,
+    headers: { "content-type": "application/json", "location": issueUrl },
+  });
+}
+
+async function handleIssueCreateHtml(state: Daemon, req: Request, repo: string): Promise<Response> {
+  const result = await performIssueCreate(state, req, repo);
+  if (result instanceof Response) return result;
+  const { issue } = result;
+  const issueUrl = `/repos/${encodeURIComponent(repo)}/issues/${encodeURIComponent(issue.meta.id)}`;
+  return new Response("", { status: 303, headers: { location: issueUrl } });
+}
+
+async function handleIssueDetailJson(state: Daemon, repo: string, id: string): Promise<Response> {
+  const issue = await issues.readIssue(state.root, repo, id);
+  if (!issue) return textResponse(404, "issue not found");
+  return new Response(JSON.stringify(issues.toWire(issue)), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+async function handleIssueDetailHtml(state: Daemon, repo: string, id: string): Promise<Response> {
+  const issue = await issues.readIssue(state.root, repo, id);
+  if (!issue) return textResponse(404, "issue not found");
+  return new Response(renderDetailPage(issue, repo), {
+    status: 200,
+    headers: { "content-type": "text/html; charset=utf-8" },
+  });
 }
 
 async function handleIssueComment(

@@ -99,3 +99,75 @@ function collectLabels(all: Issue[]): string[] {
   for (const issue of all) for (const l of issue.meta.labels) seen.add(l);
   return [...seen].sort();
 }
+
+// ---------- single issue detail page ----------
+
+export function renderDetailPage(issue: Issue, repo: string): string {
+  const { meta, body, comments } = issue;
+  const repoEnc = encodeURIComponent(repo);
+  const statusVal = meta.status === "open" ? "closed" : "open";
+  const actionLabel = meta.status === "open" ? "done" : "reopen";
+  const labelsHtml = meta.labels.length
+    ? meta.labels.map((l) => {
+        const c = labelColor(l);
+        return `<span class="label-badge" style="background:${c.bg};color:${c.dot}">${esc(l)}</span>`;
+      }).join(" ")
+    : "";
+
+  const commentsHtml = comments.map((c) => `
+    <article class="comment">
+      <div class="comment-meta">${esc(c.author)} &middot; ${relativeAge(c.created)}</div>
+      <div class="comment-body">${renderMarkdown(c.body)}</div>
+    </article>`).join("");
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>${esc(meta.id)} — ${esc(meta.title)} — ${esc(repo)}</title>
+<link rel="stylesheet" href="/static/mesh.css">
+</head>
+<body>
+<h1><a href="/repos/${repoEnc}/issues">${esc(repo)}</a> / <strong>${esc(meta.id)}</strong></h1>
+<nav>
+  <a href="/repos/${repoEnc}/issues">← issues</a>
+</nav>
+<article class="issue-detail" data-status="${meta.status}" data-id="${esc(meta.id)}" data-labels="${esc(meta.labels.join(","))}">
+  <header class="issue-detail-header">
+    <h2>${esc(meta.title)}</h2>
+    <div class="issue-meta">
+      <span class="status-badge status-${meta.status}">${meta.status}</span>
+      ${labelsHtml}
+      <span>${esc(meta.author)} &middot; ${relativeAge(meta.created)}</span>
+    </div>
+  </header>
+  <div class="issue-body">${renderMarkdown(body)}</div>
+  ${commentsHtml ? `<section class="comments">${commentsHtml}</section>` : ""}
+  <form class="reply-form" method="POST" action="/repos/${repoEnc}/issues/${esc(meta.id)}/comment">
+    <textarea name="body" placeholder="add a comment..." rows="4"></textarea>
+    <button class="btn-action" type="submit">reply</button>
+  </form>
+  <div class="issue-actions">
+    <form method="POST" action="/repos/${repoEnc}/issues/${esc(meta.id)}/status" style="display:inline">
+      <input type="hidden" name="status" value="${statusVal}">
+      <button class="btn-action" type="submit">${actionLabel}</button>
+    </form>
+    <button class="btn-trash" type="button" onclick="trashAndRedirect('${esc(meta.id)}', '${esc(repo)}')">trash</button>
+  </div>
+</article>
+<footer><a href="/status">mesh status</a> &middot; built on Bun</footer>
+<script>
+async function trashAndRedirect(id, repo) {
+  const form = new FormData();
+  form.set('status', 'trashed');
+  try {
+    await fetch('/repos/' + encodeURIComponent(repo) + '/issues/' + encodeURIComponent(id) + '/status', {
+      method: 'POST', body: form
+    });
+    location.href = '/repos/' + encodeURIComponent(repo) + '/issues';
+  } catch {}
+}
+</script>
+</body>
+</html>`;
+}
