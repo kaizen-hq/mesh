@@ -214,6 +214,12 @@ export async function repoStatuses(state: RepoStoreCtx): Promise<RepoStatus[]> {
   const out: RepoStatus[] = [];
   for (const [name] of state.repos.entries()) {
     const dir = mirrorPath(state.root, name);
+    if (!(await exists(dir))) {
+      // Mirror not yet on disk — advertise the repo name so peers know it exists
+      // but don't include branch info (the git process would crash on a missing dir).
+      out.push({ name, head_sha: null, branches: [] });
+      continue;
+    }
     const head_sha = (await git.headSha(dir)) ?? null;
     const branchPairs = await git.branchHeads(dir);
     const branches: BranchStatus[] = branchPairs.map(([n, s]) => ({ name: n, sha: s }));

@@ -10,6 +10,7 @@ import { Daemon } from "./daemon.ts";
 import * as httpServer from "./http_server.ts";
 import * as ed from "./ed25519.ts";
 import { signFrame, encodeFrame, encodePubkey } from "./proto.ts";
+import { runInitialHello } from "./peer_link.ts";
 import type { Config } from "./config.ts";
 import { DEFAULT_RUNNER } from "./config.ts";
 import type { Identity } from "./identity.ts";
@@ -244,5 +245,86 @@ describe("two-node heartbeat exchange", () => {
 
     expect(bob.daemon.peers.get("alice")!.isConnected()).toBe(true);
     expect(alice.daemon.peers.get("bob")!.isConnected()).toBe(true);
+  });
+});
+
+// ---------- multi-address fallback ----------
+
+describe("multi-address fallback", () => {
+  it("skips an invalid first address and delivers via the second", async () => {
+    const aliceId = await makeIdentity();
+    const bobId = await makeIdentity();
+
+    // Start bob first so we know his real address.
+    const bob = await startNode("bob", bobId, [
+      { name: "alice", pubkey: aliceId.pubkeyString, addresses: [] },
+    ]);
+    nodes.push(bob);
+
+    // Alice knows bob at two addresses: a bad one first, the real one second.
+    const bobRealAddr = bob.baseUrl.replace("http://", "");
+    const alice = await startNode("alice", aliceId, [
+      { name: "bob", pubkey: bobId.pubkeyString, addresses: ["127.0.0.1:1", bobRealAddr] },
+    ]);
+    nodes.push(alice);
+
+    // runInitialHello drives sendTo(), which iterates addresses in order.
+    await runInitialHello(alice.daemon);
+
+    // Bob received alice's Hello via the second address.
+    expect(bob.daemon.peers.get("alice")!.isConnected()).toBe(true);
+
+    // The working address was promoted to front in alice's entry for bob.
+    expect(alice.daemon.peers.get("bob")!.addresses[0]).toBe(bobRealAddr);
+  });
+
+  it("Hello triggers a heartbeat reply so the sender learns about repos immediately", async () => {
+    const agentId = await makeIdentity();
+    const controllerId = await makeIdentity();
+
+    // Start both nodes with empty addresses, then wire them up once both ports
+    // are known. This simulates the case where only one side has the other in
+    // its static config (but both addresses are reachable).
+    const agent = await startNode("agent", agentId, [
+      { name: "controller", pubkey: controllerId.pubkeyString, addresses: [] },
+    ]);
+    const controller = await startNode("controller", controllerId, [
+      { name: "agent", pubkey: agentId.pubkeyString, addresses: [] },
+    ]);
+    nodes.push(agent, controller);
+
+    // Set addresses now that both ports are assigned.
+    agent.daemon.peers.get("controller")!.addresses = [controller.baseUrl.replace("http://", "")];
+    controller.daemon.peers.get("agent")!.addresses = [agent.baseUrl.replace("http://", "")];
+
+    // Seed the agent with a repo so it has something to advertise.
+    agent.daemon.repos.ensure("my-repo").noteSource("agent");
+
+    // Controller sends Hello to agent; agent should reply with a heartbeat.
+    await runInitialHello(controller.daemon);
+
+    // The heartbeat reply is async — give it a moment to arrive.
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Controller should now know about agent's repo even though agent never
+    // sent a scheduled heartbeat to the controller.
+    expect(controller.daemon.repos.has("my-repo")).toBe(true);
+    expect(controller.daemon.repos.get("my-repo")!.sourceList()).toContain("agent");
+  });
+
+  it("enqueues the frame for retry when all addresses fail", async () => {
+    const aliceId = await makeIdentity();
+    const bobId = await makeIdentity();
+
+    // Bob is listed with two bad addresses — neither will connect.
+    const alice = await startNode("alice", aliceId, [
+      { name: "bob", pubkey: bobId.pubkeyString, addresses: ["127.0.0.1:1", "127.0.0.1:2"] },
+    ]);
+    nodes.push(alice);
+
+    await runInitialHello(alice.daemon);
+
+    // Frame could not be delivered; it should be queued for retry.
+    expect(alice.daemon.outbound.destinations()).toContain("bob");
   });
 });

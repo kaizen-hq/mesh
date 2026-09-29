@@ -16,8 +16,8 @@ export class PeerEntry {
   lastCiSyncMs: number | null = null;    // epoch ms of last successful CI runs full-sync pull
   capabilities: NodeCapabilities | null = null;
 
-  isConnected(): boolean {
-    const recent = (t: number | null) => t != null && Date.now() - t < 60_000;
+  isConnected(windowMs = 60_000): boolean {
+    const recent = (t: number | null) => t != null && Date.now() - t < windowMs;
     return recent(this.lastPostOk) || recent(this.lastPostSeen);
   }
   notePostOk() {

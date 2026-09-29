@@ -406,7 +406,7 @@ function peerSummaries(state: ControlCtx, now: number): unknown[] {
         pubkey: p.pubkey,
         last_heartbeat_secs: last,
         address: e?.addresses[0] ?? null,
-        reachable: e?.isConnected() ?? false,
+        reachable: e?.isConnected(state.config.transport.poll_secs * 3_000) ?? false,
       };
     });
 }

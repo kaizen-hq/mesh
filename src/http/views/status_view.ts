@@ -26,7 +26,7 @@ export function renderStatusData(ctx: StatusViewCtx): string {
     if (p.name === me) continue;
     const entry = peers.get(p.name);
     const addr = entry?.addresses[0] ?? "(no address)";
-    const reachable = entry?.isConnected() ?? false;
+    const reachable = entry?.isConnected(cfg.transport.poll_secs * 3_000) ?? false;
     const hb = entry?.lastHeartbeat ? `${Math.floor((now - entry.lastHeartbeat) / 1000)}s ago` : "never";
     const cls = reachable ? "ok" : "down";
     const lbl = reachable ? "up" : "down";

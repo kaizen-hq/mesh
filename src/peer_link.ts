@@ -65,8 +65,11 @@ export async function handleInboundFrame(
   switch (msg.kind) {
     case "Hello":
       peerEntry?.noteHeartbeat(null);
-      // Reply with our known peer list so the sender can discover the rest of the mesh.
+      // Reply with our known peer list so the sender can discover the rest of the mesh,
+      // and a heartbeat so they immediately learn what repos we have. This matters when
+      // the sender is not in our static config (we'd never send them a heartbeat otherwise).
       void sendPeerList(state, sender);
+      void sendHeartbeatTo(state, sender);
       break;
     case "Heartbeat":
       peerEntry?.noteHeartbeat(null);
@@ -353,6 +356,23 @@ async function sendPeerList(state: PeerLinkCtx, dest: string): Promise<void> {
     await sendTo(state, dest, frame);
   } catch (e) {
     console.warn(`sendPeerList to ${dest} failed:`, (e as Error).message);
+  }
+}
+
+async function sendHeartbeatTo(state: PeerLinkCtx, dest: string): Promise<void> {
+  const me = state.config.self.name;
+  const repos = await repoStore.repoStatuses(state);
+  const msg: Message = {
+    kind: "Heartbeat",
+    name: me,
+    repos,
+    capabilities: state.ci.capabilities ?? undefined,
+  };
+  try {
+    const frame = await signFrame(me, dest, msg, state.identity.privateKey);
+    await sendTo(state, dest, frame);
+  } catch (e) {
+    console.debug(`hello-triggered heartbeat to ${dest} failed:`, (e as Error).message);
   }
 }
 
