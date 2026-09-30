@@ -60,9 +60,9 @@ async function setupMirror(root: string, repo: string): Promise<string> {
   return mirrorDir;
 }
 
-type PeerSpec = { name: string; addresses: string[] };
+type PeerSpec = { name: string; addresses: string[]; runner?: boolean };
 
-async function makeCtx(root: string, peerSpecs: PeerSpec[]): Promise<SchedulerCtx> {
+async function makeCtx(root: string, peerSpecs: PeerSpec[], opts: { runnerEnabled?: boolean } = {}): Promise<SchedulerCtx> {
   const ci = new CiDomain();
   const seed = crypto.getRandomValues(new Uint8Array(32));
   const publicKey = await ed.getPublicKeyAsync(seed);
@@ -79,7 +79,7 @@ async function makeCtx(root: string, peerSpecs: PeerSpec[]): Promise<SchedulerCt
   const peerMap = new Map<string, PeerEntry>(
     peerSpecs.map((s) => [
       s.name,
-      { addresses: s.addresses, capabilities: caps } as unknown as PeerEntry,
+      { addresses: s.addresses, capabilities: { ...caps, runner: s.runner ?? true } } as unknown as PeerEntry,
     ]),
   );
 
@@ -88,7 +88,7 @@ async function makeCtx(root: string, peerSpecs: PeerSpec[]): Promise<SchedulerCt
     config: {
       self: { name: "alice", peer_port: 7979 },
       runner: {
-        enabled: true,
+        enabled: opts.runnerEnabled ?? true,
         max_concurrent_jobs: 4,
         execution_modes: ["shell"],
         labels: [],
@@ -102,6 +102,7 @@ async function makeCtx(root: string, peerSpecs: PeerSpec[]): Promise<SchedulerCt
       },
       transport: { tls: false, poll_secs: 30 },
       peers: [],
+      repo_policies: [],
       source_path: "",
     },
     ci,
@@ -139,12 +140,12 @@ describe("assignWithFallback: retry and local fallback", () => {
 
   /** Replace globalThis.fetch. URLs in successUrls return 200; everything else returns defaultStatus. */
   function mockFetch(successUrls: string[], defaultStatus = 503): void {
-    globalThis.fetch = async (input: RequestInfo | URL, _init?: RequestInit) => {
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0], _init?: Parameters<typeof fetch>[1]) => {
       const url = input.toString();
       fetchedUrls.push(url);
       const status = successUrls.includes(url) ? 200 : defaultStatus;
       return new Response("", { status });
-    };
+    }) as typeof fetch;
   }
 
   it("does not call fetch when no peer runners are registered", async () => {
@@ -227,15 +228,64 @@ describe("assignWithFallback: retry and local fallback", () => {
     ]);
     // Capture run state at the moment fetch fires (i.e., before assignment completes).
     let runExistedDuringFetch = false;
-    globalThis.fetch = async () => {
+    globalThis.fetch = (async () => {
       runExistedDuringFetch = ctx.ci.allRuns().length === 1;
       return new Response("", { status: 200 });
-    };
+    }) as unknown as typeof fetch;
     await setupMirror(root, "test-repo");
 
     await onRefUpdate(ctx, "test-repo", "refs/heads/main", "HEAD");
 
     expect(runExistedDuringFetch).toBe(true);
+  });
+
+  it("skips non-runner peers without a network call when self is an enabled runner", async () => {
+    // Simulates the real-world topology: ci-runner (self, runner=true) sees only
+    // non-runner peers (gitops-controller, agent, joeyguerra). Before this fix,
+    // the ci-runner would POST a CiAssignment to each non-runner peer, wait for
+    // a CiDeclined frame, then fall back to local — a wasteful round-trip per run.
+    const ctx = await makeCtx(root, [
+      { name: "mesh-gitops-controller", addresses: ["localhost:7001"], runner: false },
+      { name: "joey-agent",             addresses: ["localhost:7002"], runner: false },
+      { name: "joeyguerra",             addresses: ["localhost:7003"], runner: false },
+    ]);
+    let localFallbackTriggered = false;
+    ctx.notifyCiRunChanged = () => { localFallbackTriggered = true; };
+    mockFetch([]); // would fail if called
+    await setupMirror(root, "test-repo");
+
+    await onRefUpdate(ctx, "test-repo", "refs/heads/main", "HEAD");
+
+    expect(fetchedUrls).toHaveLength(0);
+    expect(localFallbackTriggered).toBe(true);
+  });
+
+  it("does not run locally when runner.enabled=false and no peers exist", async () => {
+    const ctx = await makeCtx(root, [], { runnerEnabled: false });
+    mockFetch([]);
+    await setupMirror(root, "test-repo");
+
+    await onRefUpdate(ctx, "test-repo", "refs/heads/main", "HEAD");
+
+    expect(fetchedUrls).toHaveLength(0);
+    const runs = ctx.ci.allRuns();
+    expect(runs).toHaveLength(1);
+    expect(runs[0]!.status).toBe("failed");
+  });
+
+  it("does not run locally when runner.enabled=false and all peer assignments fail", async () => {
+    const ctx = await makeCtx(root, [
+      { name: "peer-a", addresses: ["localhost:7001"] },
+    ], { runnerEnabled: false });
+    mockFetch([]); // peer-a fails
+    await setupMirror(root, "test-repo");
+
+    await onRefUpdate(ctx, "test-repo", "refs/heads/main", "HEAD");
+
+    expect(fetchedUrls).toHaveLength(1);
+    const runs = ctx.ci.allRuns();
+    expect(runs).toHaveLength(1);
+    expect(runs[0]!.status).toBe("failed");
   });
 
   it("peer with multiple addresses tries each address before moving to next peer", async () => {

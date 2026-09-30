@@ -21,6 +21,7 @@ export interface PendingAssignment {
 export class CiDomain {
   private state: CiState = emptyCiState();
   private pendingAssignments: Map<string, PendingAssignment> = new Map();
+  private _runningCount = 0;
   secrets: Record<string, string> = {};
   capabilities: NodeCapabilities | null = null;
 
@@ -31,7 +32,14 @@ export class CiDomain {
   }
 
   setRun(run: PipelineRun): void {
+    const existing = this.state.runs.get(run.run_id);
+    if (existing?.status === "running" && run.status !== "running") this._runningCount--;
+    if (existing?.status !== "running" && run.status === "running") this._runningCount++;
     this.state.runs.set(run.run_id, run);
+  }
+
+  runningCount(): number {
+    return this._runningCount;
   }
 
   allRuns(): PipelineRun[] {

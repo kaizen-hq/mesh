@@ -61,6 +61,7 @@ function globMatch(str: string, pattern: string): boolean {
 export function rankRunners(
   peers: PeerCapabilityEntry[],
   req: RunnerRequirements,
+  selfName?: string,
 ): string[] {
   const hasLabels = (p: PeerCapabilityEntry) =>
     req.labels.every((l) => p.labels.includes(l));
@@ -76,7 +77,7 @@ export function rankRunners(
       ? peers.filter((p) => !p.runner && hasLabels(p) && hasCapacity(p))
       : [];
 
-  return [...sortByLoad(dedicated), ...sortByLoad(fallback)].map((p) => p.name);
+  return [...sortByLoad(dedicated, selfName), ...sortByLoad(fallback, selfName)].map((p) => p.name);
 }
 
 // Kept for backwards compatibility — returns the top-ranked candidate or null.
@@ -87,9 +88,15 @@ export function selectRunner(
   return rankRunners(peers, req)[0] ?? null;
 }
 
-function sortByLoad(candidates: PeerCapabilityEntry[]): PeerCapabilityEntry[] {
+function sortByLoad(candidates: PeerCapabilityEntry[], selfName?: string): PeerCapabilityEntry[] {
   return [...candidates].sort((a, b) => {
     if (a.jobs_running !== b.jobs_running) return a.jobs_running - b.jobs_running;
+    // When job counts are equal, prefer remote peers over self so remote runners
+    // are fully utilised before falling back to local execution. cpu_percent only
+    // breaks ties between two remote peers (self's cpu is not measured).
+    const aIsSelf = a.name === selfName;
+    const bIsSelf = b.name === selfName;
+    if (aIsSelf !== bIsSelf) return Number(aIsSelf) - Number(bIsSelf);
     return a.cpu_percent - b.cpu_percent;
   });
 }
@@ -98,9 +105,31 @@ function sortByLoad(candidates: PeerCapabilityEntry[]): PeerCapabilityEntry[] {
 
 function peerCapabilities(state: SchedulerCtx): PeerCapabilityEntry[] {
   const entries: PeerCapabilityEntry[] = [];
+
+  // Include self as a candidate when the local runner is enabled. This lets
+  // rankRunners compare self's load against remote runners so jobs go to the
+  // least-loaded capable node rather than always hitting remote peers first.
+  if (state.config.runner.enabled) {
+    const jobs_running = state.ci.runningCount();
+    entries.push({
+      name: state.config.self.name,
+      runner: true,
+      labels: state.config.runner.labels,
+      tools: state.config.runner.tools,
+      jobs_running,
+      cpu_percent: 0, // not measured locally; name-based tiebreaker in sortByLoad handles equal-load cases
+      mem_free_mb: 0,
+      max_concurrent_jobs: state.config.runner.max_concurrent_jobs,
+    });
+  }
+
   for (const [name, peer] of state.peers.entries()) {
     const caps = peer.capabilities;
     if (!caps) continue;
+    // When self is an enabled runner, non-runner peers will always decline any
+    // assignment — skip them to avoid a wasteful network round-trip before the
+    // local fallback.
+    if (!caps.runner && state.config.runner.enabled) continue;
     entries.push({
       name,
       runner: caps.runner,
@@ -156,7 +185,7 @@ export async function onManualRun(
 
   const candidates = peerCapabilities(state);
   console.log(`[ci] runner candidates: [${candidates.map((c) => `${c.name}(runner=${c.runner},jobs=${c.jobs_running}/${c.max_concurrent_jobs})`).join(", ")}]`);
-  const rankedPeers = rankRunners(candidates, pipeline.runner);
+  const rankedPeers = rankRunners(candidates, pipeline.runner, state.config.self.name);
 
   // Always persist the run on the originating node so CiStarted/CiCompleted
   // updates from the runner are applied even when the run was assigned remotely.
@@ -213,7 +242,7 @@ export async function onRefUpdate(
 
   const candidates = peerCapabilities(state);
   console.log(`[ci] runner candidates: [${candidates.map((c) => `${c.name}(runner=${c.runner},jobs=${c.jobs_running}/${c.max_concurrent_jobs})`).join(", ")}]`);
-  const rankedPeers = rankRunners(candidates, pipeline.runner);
+  const rankedPeers = rankRunners(candidates, pipeline.runner, state.config.self.name);
 
   // Always persist the run on the originating node so CiStarted/CiCompleted
   // updates from the runner are applied even when the run was assigned remotely.
@@ -232,7 +261,21 @@ async function assignWithFallback(
   pipeline: Pipeline,
   trigger: TriggerKind,
 ): Promise<void> {
-  for (const peer of rankedPeers.slice(0, MAX_ASSIGNMENT_ATTEMPTS)) {
+  const selfName = state.config.self.name;
+  let remoteAttempts = 0;
+
+  for (const peer of rankedPeers) {
+    // Self appears in the ranked list when runner.enabled=true. Run locally
+    // at this rank position rather than making a loopback network call.
+    if (peer === selfName) {
+      console.log(`[ci] running ${run.run_id} locally (self is highest-ranked available runner)`);
+      scheduleLocalRun(state, pipeline, run);
+      return;
+    }
+
+    if (remoteAttempts >= MAX_ASSIGNMENT_ATTEMPTS) break;
+    remoteAttempts++;
+
     console.log(`[ci] assigning run ${run.run_id} to peer ${peer}`);
     if (await sendAssignment(state, peer, run, pipeline, trigger)) {
       // Reflect the assigned peer in the run record immediately so the UI
@@ -246,7 +289,21 @@ async function assignWithFallback(
       return;
     }
   }
-  if (rankedPeers.length === 0) {
+
+  if (!state.config.runner.enabled) {
+    const reason =
+      rankedPeers.length === 0
+        ? "no peer runner available and local runner is disabled"
+        : "all peer assignments failed and local runner is disabled";
+    console.log(`[ci] run ${run.run_id} cannot be executed: ${reason}`);
+    const failed = { ...run, status: "failed" as const };
+    state.ci.setRun(failed);
+    void saveRun(state.root, failed).catch(() => {});
+    state.notifyCiRunChanged(failed.repo);
+    return;
+  }
+
+  if (remoteAttempts === 0) {
     console.log(`[ci] no peer runner available, running ${run.run_id} locally`);
   } else {
     console.log(`[ci] all peer assignments failed, running ${run.run_id} locally`);
@@ -452,8 +509,7 @@ export async function handleAssignment(
 
   if (!cfg.enabled) { await decline("runner not enabled"); return; }
 
-  const running = state.ci.allRuns().filter((r) => r.status === "running").length;
-  if (running >= cfg.max_concurrent_jobs) { await decline("at capacity"); return; }
+  if (state.ci.runningCount() >= cfg.max_concurrent_jobs) { await decline("at capacity"); return; }
 
   console.log(`[ci] accepted assignment ${msg.run_id} for ${msg.repo} @ ${msg.ref} from ${sender ?? "self"}`);
 

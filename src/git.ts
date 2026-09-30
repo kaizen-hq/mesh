@@ -277,7 +277,7 @@ export async function changedPaths(dir: string, fromSha: string | null, toSha: s
   const from = fromSha ?? EMPTY_TREE;
   const proc = Bun.spawn(
     ["git", "diff-tree", "--no-commit-id", "-r", "--name-only", from, toSha],
-    { cwd: dir, stdout: "pipe", stderr: "pipe" },
+    { cwd: dir, stdout: "pipe", stderr: "ignore" },
   );
   const out = await new Response(proc.stdout).text();
   await proc.exited;

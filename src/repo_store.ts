@@ -171,10 +171,14 @@ export async function reconcileFromPeer(
   const remoteRefs = await git.listRefs(dir, remotePrefix);
 
   // Build a set of deny_path prefixes for this peer+repo combination.
-  const peerPubkey = state.peers.getPubkey(peer) ?? "";
-  const deniedPrefixes = state.config.repo_policies
-    .filter((p) => p.repo === repo && p.peer === peerPubkey)
-    .flatMap((p) => p.deny_paths);
+  // Skip the check entirely when the peer's pubkey is unknown — an empty string
+  // could silently match misconfigured policy entries.
+  const peerPubkey = state.peers.getPubkey(peer);
+  const deniedPrefixes = peerPubkey
+    ? state.config.repo_policies
+        .filter((p) => p.repo === repo && p.peer === peerPubkey)
+        .flatMap((p) => p.deny_paths)
+    : [];
 
   async function isDenied(fromSha: string | null, toSha: string): Promise<boolean> {
     if (deniedPrefixes.length === 0) return false;
