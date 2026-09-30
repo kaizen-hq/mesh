@@ -268,3 +268,18 @@ export async function isAncestor(dir: string, ancestor: string, descendant: stri
   ).exited;
   return exit === 0;
 }
+
+const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/** Return the list of file paths changed between two commits.
+ *  Pass null for fromSha when the branch is new (diffs against empty tree). */
+export async function changedPaths(dir: string, fromSha: string | null, toSha: string): Promise<string[]> {
+  const from = fromSha ?? EMPTY_TREE;
+  const proc = Bun.spawn(
+    ["git", "diff-tree", "--no-commit-id", "-r", "--name-only", from, toSha],
+    { cwd: dir, stdout: "pipe", stderr: "pipe" },
+  );
+  const out = await new Response(proc.stdout).text();
+  await proc.exited;
+  return out.split("\n").map((l) => l.trim()).filter(Boolean);
+}

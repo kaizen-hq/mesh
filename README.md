@@ -202,6 +202,38 @@ env:
 
 > Note: IPv6 CIDR ranges (e.g. `2001:db8::/32`) are not currently supported in the allowlist. Exact IPv6 addresses work fine. IPv4-mapped IPv6 addresses (`::ffff:x.x.x.x`) are automatically normalised to their IPv4 form before matching.
 
+### Per-repo path restrictions (`[[repo_policy]]`)
+
+By default, any peered node can push any path to any repo. If you want to prevent a specific peer from modifying certain directories — for example, stopping an AI agent from rewriting its own deployment manifests — add a `[[repo_policy]]` block to `mesh.toml`:
+
+```toml
+[[repo_policy]]
+repo = "mesh-gitops"
+peer = "ed25519:<base64-pubkey>"
+deny_paths = ["apps/agent/", "infra/"]
+```
+
+| Field | Description |
+|-------|-------------|
+| `repo` | Repo name (without `.git` suffix) |
+| `peer` | The peer's ed25519 pubkey string — find it in `mesh invite` output or in the peer's own `mesh.toml` under `[self]` |
+| `deny_paths` | Path prefixes the peer may not modify. Any commit that touches a path starting with one of these strings is blocked. |
+
+When a blocked push is received, the daemon logs a warning and parks the commits under `refs/replicas/` (the divergent state) instead of advancing the branch. The peer's push to its own local daemon always succeeds — the restriction is enforced on the *receiving* side during replication.
+
+Multiple `[[repo_policy]]` blocks can exist for the same repo (different peers) or the same peer (different repos).
+
+**Finding a peer's pubkey.** The pubkey is printed during `mesh invite`:
+
+```
+joined: inviter=ci-runner address=...
+inviter pubkey: ed25519:n/9r93WtRPjy1c8gfll3g/ZCVkgQ/ulci9uSsAm2Rzs=
+```
+
+It is also in the peer's `~/.mesh/mesh.toml` as the `pubkey` field on their entry in every node they have joined.
+
+**Applying after `mesh reload`.** Like all `mesh.toml` changes, run `mesh reload` on the node where the restriction should be enforced. The policy takes effect immediately for the next inbound replication from that peer.
+
 ## CI/CD
 
 Mesh includes a distributed CI/CD system. Pipelines are defined per-repo and
