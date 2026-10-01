@@ -30,6 +30,11 @@ export class Daemon {
   issueChangedCallbacks: Array<(repo: string) => void> = [];
   statusChangedCallbacks: Array<() => void> = [];
   ciRunChangedCallbacks: Array<(repo: string) => void> = [];
+  repoDeletionCallbacks: Array<(repo: string) => void> = [];
+
+  // Repo lifecycle callbacks — registered by main.ts, fired by control/http_server.
+  repoDeletionCallbacks: Array<(repo: string, deleted_at: string) => void> = [];
+  repoCreatedCallbacks: Array<(repo: string, introduced_at: string, introduced_by: string) => void> = [];
 
   private shutdownResolve: (() => void) | null = null;
   private shutdownPromise: Promise<void>;
@@ -79,6 +84,14 @@ export class Daemon {
 
   // ---------- notifications (Mediator dispatches explicitly) ----------
 
+  broadcastRepoDeletion(repo: string, deleted_at: string): void {
+    for (const cb of this.repoDeletionCallbacks) cb(repo, deleted_at);
+  }
+
+  broadcastRepoCreated(repo: string, introduced_at: string, introduced_by: string): void {
+    for (const cb of this.repoCreatedCallbacks) cb(repo, introduced_at, introduced_by);
+  }
+
   notifyIssueChanged(repo: string): void {
     for (const cb of this.issueChangedCallbacks) cb(repo);
   }
@@ -89,6 +102,10 @@ export class Daemon {
 
   notifyCiRunChanged(repo: string): void {
     for (const cb of this.ciRunChangedCallbacks) cb(repo);
+  }
+
+  broadcastRepoDeletion(repo: string): void {
+    for (const cb of this.repoDeletionCallbacks) cb(repo);
   }
 
   // ---------- lifecycle ----------

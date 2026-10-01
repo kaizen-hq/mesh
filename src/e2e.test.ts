@@ -11,6 +11,7 @@ import * as httpServer from "./http_server.ts";
 import * as ed from "./ed25519.ts";
 import { signFrame, encodeFrame, encodePubkey } from "./proto.ts";
 import { runInitialHello } from "./peer_link.ts";
+import { loadTombstone } from "./repo_store.ts";
 import type { Config } from "./config.ts";
 import { DEFAULT_RUNNER } from "./config.ts";
 import type { Identity } from "./identity.ts";
@@ -310,6 +311,147 @@ describe("multi-address fallback", () => {
     // sent a scheduled heartbeat to the controller.
     expect(controller.daemon.repos.has("my-repo")).toBe(true);
     expect(controller.daemon.repos.get("my-repo")!.sourceList()).toContain("agent");
+  });
+
+  it("RepoDeleted frame tombstones the repo on the receiving node", async () => {
+    const aliceId = await makeIdentity();
+    const bobId = await makeIdentity();
+
+    const alice = await startNode("alice", aliceId, [
+      { name: "bob", pubkey: bobId.pubkeyString, addresses: [] },
+    ]);
+    const bob = await startNode("bob", bobId, [
+      { name: "alice", pubkey: aliceId.pubkeyString, addresses: [] },
+    ]);
+    nodes.push(alice, bob);
+
+    // Give bob a repo in his registry
+    bob.daemon.repos.ensure("my-project").noteSource("alice");
+
+    const deleted_at = "2026-10-01T00:00:00.000Z";
+    const frame = await signFrame("alice", "bob", {
+      kind: "RepoDeleted",
+      repo: "my-project",
+      deleted_at,
+    }, aliceId.privateKey);
+
+    const res = await postFrame(bob.baseUrl, frame);
+    expect(res.status).toBe(202);
+
+    // Give the async handler time to run
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(bob.daemon.repos.has("my-project")).toBe(false);
+    const tombstone = await loadTombstone(bob.root, "my-project");
+    expect(tombstone).not.toBeNull();
+    expect(tombstone?.deleted_at).toBe(deleted_at);
+    expect(tombstone?.deleted_by).toBe("alice");
+  });
+
+  it("RepoDeleted is ignored when the local copy has a newer introduced_at", async () => {
+    const aliceId = await makeIdentity();
+    const bobId = await makeIdentity();
+
+    const alice = await startNode("alice", aliceId, [
+      { name: "bob", pubkey: bobId.pubkeyString, addresses: [] },
+    ]);
+    const bob = await startNode("bob", bobId, [
+      { name: "alice", pubkey: aliceId.pubkeyString, addresses: [] },
+    ]);
+    nodes.push(alice, bob);
+
+    // Bob has a newer local copy (re-created after alice's deletion)
+    bob.daemon.repos.ensure("my-project").noteSource("bob");
+    const { saveRepoMeta } = await import("./repo_store.ts");
+    await fs.mkdir(path.join(bob.root, "repos"), { recursive: true });
+    await saveRepoMeta(bob.root, "my-project", {
+      introduced_by: "bob",
+      introduced_at: "2026-10-02T00:00:00.000Z", // newer than deleted_at
+    });
+
+    const frame = await signFrame("alice", "bob", {
+      kind: "RepoDeleted",
+      repo: "my-project",
+      deleted_at: "2026-10-01T00:00:00.000Z", // older than bob's introduced_at
+    }, aliceId.privateKey);
+
+    await postFrame(bob.baseUrl, frame);
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Bob should keep his repo — his copy is newer
+    expect(bob.daemon.repos.has("my-project")).toBe(true);
+    expect(await loadTombstone(bob.root, "my-project")).toBeNull();
+  });
+
+  it("RepoCreated clears a tombstone when introduced_at is newer", async () => {
+    const aliceId = await makeIdentity();
+    const bobId = await makeIdentity();
+
+    const alice = await startNode("alice", aliceId, [
+      { name: "bob", pubkey: bobId.pubkeyString, addresses: [] },
+    ]);
+    const bob = await startNode("bob", bobId, [
+      { name: "alice", pubkey: aliceId.pubkeyString, addresses: [] },
+    ]);
+    nodes.push(alice, bob);
+
+    // Bob has a tombstone for the repo
+    await fs.mkdir(path.join(bob.root, "repos"), { recursive: true });
+    const { saveTombstone } = await import("./repo_store.ts");
+    await saveTombstone(bob.root, "my-project", {
+      deleted_by: "alice",
+      deleted_at: "2026-10-01T00:00:00.000Z",
+    });
+
+    // Alice sends RepoCreated with a newer timestamp
+    const frame = await signFrame("alice", "bob", {
+      kind: "RepoCreated",
+      repo: "my-project",
+      introduced_at: "2026-10-02T00:00:00.000Z",
+      introduced_by: "alice",
+    }, aliceId.privateKey);
+
+    const res = await postFrame(bob.baseUrl, frame);
+    expect(res.status).toBe(202);
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(await loadTombstone(bob.root, "my-project")).toBeNull();
+    expect(bob.daemon.repos.has("my-project")).toBe(true);
+  });
+
+  it("RepoCreated is rejected and tombstone re-sent when introduced_at is older", async () => {
+    const aliceId = await makeIdentity();
+    const bobId = await makeIdentity();
+
+    const alice = await startNode("alice", aliceId, [
+      { name: "bob", pubkey: bobId.pubkeyString, addresses: [] },
+    ]);
+    const bob = await startNode("bob", bobId, [
+      { name: "alice", pubkey: aliceId.pubkeyString, addresses: [] },
+    ]);
+    nodes.push(alice, bob);
+
+    await fs.mkdir(path.join(bob.root, "repos"), { recursive: true });
+    const { saveTombstone } = await import("./repo_store.ts");
+    await saveTombstone(bob.root, "my-project", {
+      deleted_by: "bob",
+      deleted_at: "2026-10-05T00:00:00.000Z",
+    });
+
+    // Alice sends RepoCreated with an older timestamp (predates bob's deletion)
+    const frame = await signFrame("alice", "bob", {
+      kind: "RepoCreated",
+      repo: "my-project",
+      introduced_at: "2026-10-02T00:00:00.000Z",
+      introduced_by: "alice",
+    }, aliceId.privateKey);
+
+    await postFrame(bob.baseUrl, frame);
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Tombstone should remain — the re-creation predates the deletion
+    expect(await loadTombstone(bob.root, "my-project")).not.toBeNull();
+    expect(bob.daemon.repos.has("my-project")).toBe(false);
   });
 
   it("enqueues the frame for retry when all addresses fail", async () => {

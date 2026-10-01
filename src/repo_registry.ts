@@ -63,4 +63,8 @@ export class RepoRegistry {
     }
     return r;
   }
+
+  delete(name: string): void {
+    this.repos.delete(name);
+  }
 }

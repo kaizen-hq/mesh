@@ -44,6 +44,7 @@ export interface ControlCtx {
   signalShutdown(): void;
   notifyCiRunChanged(repo: string): void;
   recordPeerAddress(peer: string, address: string): Promise<boolean>;
+  broadcastRepoDeletion(repo: string, deleted_at: string): void;
   savePendingInvites(): Promise<void>;
 }
 
@@ -330,6 +331,18 @@ async function dispatch(state: ControlCtx, req: ControlRequest): Promise<Control
       const name = String(req.name ?? "");
       try {
         await repoStore.resetRepo(state, name);
+        return { type: "ok" };
+      } catch (e) {
+        return { type: "error", message: (e as Error).message };
+      }
+    }
+    case "delete_repo": {
+      const name = String(req.name ?? "");
+      if (!name) return { type: "error", message: "delete_repo requires name" };
+      try {
+        const tombstone = { deleted_by: state.config.self.name, deleted_at: new Date().toISOString() };
+        await repoStore.deleteRepo(state, name, tombstone);
+        state.broadcastRepoDeletion(name, tombstone.deleted_at);
         return { type: "ok" };
       } catch (e) {
         return { type: "error", message: (e as Error).message };

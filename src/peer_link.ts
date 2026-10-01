@@ -81,6 +81,15 @@ export async function handleInboundFrame(
         }
         state.repos.ensure(r.name).noteSource(sender);
       }
+      void (async () => {
+        for (const r of msg.repos) {
+          if (!isValidRepoName(r.name)) continue;
+          const tombstone = await repoStore.loadTombstone(state.root, r.name);
+          if (tombstone) {
+            await sendRepoDeletedTo(state, sender, r.name, tombstone.deleted_at);
+          }
+        }
+      })();
       const validRepos = msg.repos.filter((r) => isValidRepoName(r.name));
       scheduleReconcileIfStale(state, sender, validRepos);
       scheduleIssueSyncIfStale(state, sender, validRepos);
@@ -115,6 +124,46 @@ export async function handleInboundFrame(
         if (p.name === state.config.self.name) continue;
         state.peers.addIntroduced(p.name, p.pubkey, p.addresses, sender);
       }
+      break;
+    case "RepoDeleted":
+      void (async () => {
+        try {
+          const meta = await repoStore.loadRepoMeta(state.root, msg.repo);
+          if (meta && meta.introduced_at > msg.deleted_at) {
+            // Our copy was created after this deletion — ignore it
+            return;
+          }
+          const tombstone = { deleted_by: sender, deleted_at: msg.deleted_at };
+          if (state.repos.has(msg.repo)) {
+            await repoStore.deleteRepo(state, msg.repo, tombstone);
+          } else {
+            // Write tombstone even if we don't have the repo locally, to block re-introduction
+            await repoStore.saveTombstone(state.root, msg.repo, tombstone);
+          }
+          state.notifyStatusChanged();
+        } catch (e) {
+          console.warn(`RepoDeleted handler failed (repo=${msg.repo}):`, (e as Error).message);
+        }
+      })();
+      break;
+    case "RepoCreated":
+      void (async () => {
+        try {
+          if (!isValidRepoName(msg.repo)) return;
+          const tombstone = await repoStore.loadTombstone(state.root, msg.repo);
+          if (tombstone && msg.introduced_at <= tombstone.deleted_at) {
+            // This creation predates our tombstone — re-send the tombstone
+            await sendRepoDeletedTo(state, sender, msg.repo, tombstone.deleted_at);
+            return;
+          }
+          // Newer than tombstone (or no tombstone) — clear it and accept the repo
+          await repoStore.deleteTombstone(state.root, msg.repo);
+          state.repos.ensure(msg.repo).noteSource(sender);
+          state.notifyStatusChanged();
+        } catch (e) {
+          console.warn(`RepoCreated handler failed (repo=${msg.repo}):`, (e as Error).message);
+        }
+      })();
       break;
   }
 }
@@ -204,6 +253,12 @@ async function handleInboundRefUpdate(
   repo: string,
   _refs: RefChange[],
 ): Promise<void> {
+  // Check tombstone before accepting any data from this peer
+  const tombstone = await repoStore.loadTombstone(state.root, repo);
+  if (tombstone) {
+    await sendRepoDeletedTo(state, sender, repo, tombstone.deleted_at);
+    return;
+  }
   const isNew = !state.repos.has(repo);
   const local = state.repos.ensure(repo);
   local.noteSource(sender);
@@ -264,6 +319,11 @@ function scheduleReconcileIfStale(
   // Fire-and-forget; reconciliation can take a few seconds.
   void (async () => {
     for (const r of advertised) {
+      const tombstone = await repoStore.loadTombstone(state.root, r.name);
+      if (tombstone) {
+        await sendRepoDeletedTo(state, peer, r.name, tombstone.deleted_at);
+        continue;
+      }
       const dir = repoStore.mirrorPath(state.root, r.name);
       let stale = false;
       try {
@@ -516,6 +576,45 @@ export async function runInitialHello(state: PeerLinkCtx): Promise<void> {
       console.debug(`initial hello to ${p.name} failed:`, (e as Error).message);
     }
   }
+}
+
+// ---------- repo deletion / creation broadcast ----------
+
+async function sendRepoDeletedTo(state: PeerLinkCtx, peer: string, repo: string, deleted_at: string): Promise<void> {
+  const me = state.config.self.name;
+  const msg: Message = { kind: "RepoDeleted", repo, deleted_at };
+  try {
+    const frame = await signFrame(me, peer, msg, state.identity.privateKey);
+    await sendTo(state, peer, frame);
+  } catch (e) {
+    console.debug(`RepoDeleted to ${peer} failed:`, (e as Error).message);
+  }
+}
+
+export function broadcastRepoDeletion(state: PeerLinkCtx, repo: string, deleted_at: string): void {
+  void (async () => {
+    const me = state.config.self.name;
+    for (const p of state.config.peers) {
+      if (p.name === me) continue;
+      await sendRepoDeletedTo(state, p.name, repo, deleted_at);
+    }
+  })();
+}
+
+export function broadcastRepoCreated(state: PeerLinkCtx, repo: string, introduced_at: string, introduced_by: string): void {
+  void (async () => {
+    const me = state.config.self.name;
+    for (const p of state.config.peers) {
+      if (p.name === me) continue;
+      const msg: Message = { kind: "RepoCreated", repo, introduced_at, introduced_by };
+      try {
+        const frame = await signFrame(me, p.name, msg, state.identity.privateKey);
+        await sendTo(state, p.name, frame);
+      } catch (e) {
+        console.debug(`RepoCreated broadcast to ${p.name} failed:`, (e as Error).message);
+      }
+    }
+  })();
 }
 
 // ---------- RefUpdate broadcast ----------

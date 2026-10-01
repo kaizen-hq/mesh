@@ -637,19 +637,23 @@ async function handleGit(state: Daemon, req: Request, url: URL, server: any): Pr
 
   const dir = repoStore.mirrorPath(state.root, parsed.repo);
   const mirrorExists = await Bun.file(path.join(dir, "HEAD")).exists();
+  let introducedAt: string | null = null;
   if (!mirrorExists) {
     if (service !== "git-receive-pack") {
       return textResponse(404, "repo not found");
     }
-    // First push — auto-create the bare mirror and record provenance.
+    // First push (or re-creation) — auto-create the bare mirror and record provenance.
     try {
       await gitp.initBare(dir);
     } catch (e) {
       return textResponse(500, `failed to init repo: ${(e as Error).message}`);
     }
+    // Clear any tombstone — a deliberate local push supersedes a prior deletion.
+    await repoStore.deleteTombstone(state.root, parsed.repo);
+    introducedAt = new Date().toISOString();
     await repoStore.saveRepoMeta(state.root, parsed.repo, {
       introduced_by: state.config.self.name,
-      introduced_at: new Date().toISOString(),
+      introduced_at: introducedAt,
     });
   }
 
@@ -684,6 +688,9 @@ async function handleGit(state: Daemon, req: Request, url: URL, server: any): Pr
       const head = await gitp.headSha(dir);
       if (head) local.lastHead = head;
       peerLink.broadcastRefUpdate(state, parsed.repo, changes, null);
+    }
+    if (introducedAt) {
+      peerLink.broadcastRepoCreated(state, parsed.repo, introducedAt, state.config.self.name);
     }
   }
   return resp;

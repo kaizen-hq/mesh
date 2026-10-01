@@ -47,6 +47,7 @@ const USAGE_TAIL = `  start [flags]                     Run the foreground serve
   sync [--repo NAME]                force one reconcile round
   reload                            re-read mesh.toml
   reset-repo <name>                 hard-reset a mirror
+  delete-repo <name>                permanently delete a repo from this node and notify peers
   add-address <peer> <addr>         bootstrap a peer's address
   add-peer <name> <pubkey> [addr]   add a peer to mesh.toml
   remove-peer <name>                remove a peer from mesh.toml
@@ -185,6 +186,14 @@ async function main() {
           process.exit(1);
         }
         return await sendAndPrint(root, { type: "reset_repo", name });
+      }
+      case "delete-repo": {
+        const name = args.positional[0];
+        if (!name) {
+          console.error("usage: mesh delete-repo <name>");
+          process.exit(1);
+        }
+        return await sendAndPrint(root, { type: "delete_repo", name });
       }
       case "add-address": {
         const peer = args.positional[0];
@@ -369,9 +378,12 @@ async function cmdStart(root: string, args: Args) {
 
   const state = await Daemon.create(root, cfg, id);
 
-  // Pre-populate registry from any mirrors that already exist on disk.
+  // Pre-populate registry from any mirrors that already exist on disk (skip tombstoned repos).
   const existingMirrors = await repoStore.scanMirrors(root);
-  for (const name of existingMirrors) state.repos.ensure(name);
+  for (const name of existingMirrors) {
+    const tombstone = await repoStore.loadTombstone(root, name);
+    if (!tombstone) state.repos.ensure(name);
+  }
   await repoStore.ensureMirrors(state);
 
   // Mark any runs left in "pending" or "running" from a previous daemon session as failed.
@@ -397,6 +409,10 @@ async function cmdStart(root: string, args: Args) {
   // Spawn background tasks.
   const server = await httpServer.run(state, listen);
   const controlServer = await control.run(state);
+
+  // Wire repo lifecycle callbacks.
+  state.repoDeletionCallbacks.push((repo, deleted_at) => peerLink.broadcastRepoDeletion(state, repo, deleted_at));
+  state.repoCreatedCallbacks.push((repo, introduced_at, introduced_by) => peerLink.broadcastRepoCreated(state, repo, introduced_at, introduced_by));
 
   void peerLink.runInitialHello(state);
   void peerLink.runHeartbeat(state, heartbeatSecs);

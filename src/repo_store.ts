@@ -26,6 +26,10 @@ function metaPath(root: string, repo: string): string {
   return path.join(root, "repos", `${repo}.meta.json`);
 }
 
+function tombstonePath(root: string, repo: string): string {
+  return path.join(root, "repos", `${repo}.tombstone.json`);
+}
+
 // ---------- repo metadata ----------
 
 export interface RepoMeta {
@@ -47,6 +51,51 @@ export async function saveRepoMeta(root: string, repo: string, meta: RepoMeta): 
   const tmp = file + ".tmp";
   await fs.writeFile(tmp, JSON.stringify(meta), "utf8");
   await fs.rename(tmp, file);
+}
+
+export interface TombstoneRecord {
+  deleted_by: string;
+  deleted_at: string;
+}
+
+export async function loadTombstone(root: string, repo: string): Promise<TombstoneRecord | null> {
+  try {
+    const raw = await fs.readFile(tombstonePath(root, repo), "utf8");
+    return JSON.parse(raw) as TombstoneRecord;
+  } catch {
+    return null;
+  }
+}
+
+export async function saveTombstone(root: string, repo: string, record: TombstoneRecord): Promise<void> {
+  const file = tombstonePath(root, repo);
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  const tmp = file + ".tmp";
+  await fs.writeFile(tmp, JSON.stringify(record), "utf8");
+  await fs.rename(tmp, file);
+}
+
+export async function deleteTombstone(root: string, repo: string): Promise<void> {
+  try {
+    await fs.unlink(tombstonePath(root, repo));
+  } catch {
+    // ignore — may not exist
+  }
+}
+
+export async function deleteRepo(state: RepoStoreCtx, name: string, tombstone: TombstoneRecord): Promise<void> {
+  const dir = mirrorPath(state.root, name);
+  if (await exists(dir)) {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+  const meta = metaPath(state.root, name);
+  try {
+    await fs.unlink(meta);
+  } catch {
+    // meta file may not exist
+  }
+  await saveTombstone(state.root, name, tombstone);
+  state.repos.delete(name);
 }
 
 // ---------- startup scan ----------
@@ -88,6 +137,8 @@ export async function fetchAll(state: RepoStoreCtx): Promise<void> {
   // Fetch all known repos from any reachable peer that advertises them.
   for (const [name, local] of state.repos.entries()) {
     const dir = mirrorPath(state.root, name);
+    const tombstone = await loadTombstone(state.root, name);
+    if (tombstone) continue;
     if (!(await exists(dir))) {
       try {
         await git.initBare(dir);

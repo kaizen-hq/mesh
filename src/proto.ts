@@ -218,6 +218,17 @@ export type Message =
   | {
       kind: "PeerList";
       peers: Array<{ name: string; pubkey: string; addresses: string[] }>;
+    }
+  | {
+      kind: "RepoDeleted";
+      repo: string;
+      deleted_at: string;
+    }
+  | {
+      kind: "RepoCreated";
+      repo: string;
+      introduced_at: string;
+      introduced_by: string;
     };
 
 // ---------- encode / decode Message (bincode-compatible) ----------
@@ -284,6 +295,17 @@ function encodeMessage(msg: Message): Uint8Array {
         e.u64(p.addresses.length);
         for (const a of p.addresses) e.str(a);
       }
+      break;
+    case "RepoDeleted":
+      e.variant(6);
+      e.str(msg.repo);
+      e.str(msg.deleted_at);
+      break;
+    case "RepoCreated":
+      e.variant(7);
+      e.str(msg.repo);
+      e.str(msg.introduced_at);
+      e.str(msg.introduced_by);
       break;
   }
   return e.finish();
@@ -352,6 +374,17 @@ function decodeMessage(buf: Uint8Array): Message {
         peers.push({ name, pubkey, addresses });
       }
       return { kind: "PeerList", peers };
+    }
+    case 6: {
+      const repo = d.str();
+      const deleted_at = d.str();
+      return { kind: "RepoDeleted", repo, deleted_at };
+    }
+    case 7: {
+      const repo = d.str();
+      const introduced_at = d.str();
+      const introduced_by = d.str();
+      return { kind: "RepoCreated", repo, introduced_at, introduced_by };
     }
     default:
       throw new Error(`unknown Message variant tag: ${tag}`);
