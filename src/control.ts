@@ -42,6 +42,7 @@ export interface ControlCtx {
   pendingInvites: Map<string, PersistedInvite>;
   listenAddr: string | null;
   signalShutdown(): void;
+  notifyStatusChanged(): void;
   notifyCiRunChanged(repo: string): void;
   recordPeerAddress(peer: string, address: string): Promise<boolean>;
   broadcastRepoDeletion(repo: string, deleted_at: string): void;
@@ -342,6 +343,7 @@ async function dispatch(state: ControlCtx, req: ControlRequest): Promise<Control
       try {
         const tombstone = { deleted_by: state.config.self.name, deleted_at: new Date().toISOString() };
         await repoStore.deleteRepo(state, name, tombstone);
+        state.notifyStatusChanged();
         state.broadcastRepoDeletion(name, tombstone.deleted_at);
         return { type: "ok" };
       } catch (e) {
