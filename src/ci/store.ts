@@ -28,7 +28,9 @@ export async function saveRun(root: string, run: PipelineRun): Promise<void> {
   const dir = ciRunDir(root, run.repo, run.run_id);
   await fs.mkdir(dir, { recursive: true });
   const p = runJsonPath(root, run.repo, run.run_id);
-  await fs.writeFile(p, JSON.stringify(run, null, 2), "utf8");
+  const tmp = p + ".tmp";
+  await fs.writeFile(tmp, JSON.stringify(run, null, 2), "utf8");
+  await fs.rename(tmp, p);
   await updateRunsIndex(root, run);
 }
 
@@ -42,6 +44,7 @@ export async function loadRun(
     return JSON.parse(src) as PipelineRun;
   } catch (e: unknown) {
     if ((e as { code?: string }).code === "ENOENT") return null;
+    if (e instanceof SyntaxError) return null;
     throw e;
   }
 }

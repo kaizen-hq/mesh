@@ -65,6 +65,24 @@ describe("saveRun / loadRun", () => {
     expect(r).toBeNull();
   });
 
+  it("returns null for an empty run.json", async () => {
+    const run = makeRun();
+    const dir = ciRunDir(tmpDir, run.repo, run.run_id);
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, "run.json"), "", "utf8");
+    const result = await loadRun(tmpDir, run.repo, run.run_id);
+    expect(result).toBeNull();
+  });
+
+  it("returns null for a corrupt run.json", async () => {
+    const run = makeRun();
+    const dir = ciRunDir(tmpDir, run.repo, run.run_id);
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, "run.json"), "{not valid json", "utf8");
+    const result = await loadRun(tmpDir, run.repo, run.run_id);
+    expect(result).toBeNull();
+  });
+
   it("overwrites an existing run", async () => {
     const run = makeRun({ status: "running" });
     await saveRun(tmpDir, run);
