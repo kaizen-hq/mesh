@@ -166,6 +166,19 @@ function notifyCiRunChanged(repo: string): void {
   for (const send of clients) send();
 }
 
+// Global CI run SSE clients — fired for every repo, includes repo/runner/status in event data.
+type GlobalCiRunSend = (repo: string, runner: string, status: string) => void;
+const globalCiRunSseClients = new Set<GlobalCiRunSend>();
+
+function subscribeGlobalCiRunEvents(send: GlobalCiRunSend): () => void {
+  globalCiRunSseClients.add(send);
+  return () => globalCiRunSseClients.delete(send);
+}
+
+function notifyGlobalCiRunChanged(repo: string, runner: string, status: string): void {
+  for (const send of globalCiRunSseClients) send(repo, runner, status);
+}
+
 export interface ServerHandle {
   port: number;
   stop(): Promise<void>;
@@ -218,7 +231,10 @@ export async function run(state: Daemon, listen: string): Promise<ServerHandle> 
   // Wire SSE notifications so incoming frames trigger live updates
   state.issueChangedCallbacks.push((repo) => notifyIssueChanged(repo));
   state.statusChangedCallbacks.push(() => notifyStatusChanged());
-  state.ciRunChangedCallbacks.push((repo) => notifyCiRunChanged(repo));
+  state.ciRunChangedCallbacks.push((repo, runner, status) => {
+    notifyCiRunChanged(repo);
+    notifyGlobalCiRunChanged(repo, runner, status);
+  });
 
   return {
     port: (server as any).port as number,
@@ -275,6 +291,11 @@ async function routeRequest(state: Daemon, views: Views, req: Request, server: a
   if (repoHubMatch && req.method === "GET") {
     const repo = decodeURIComponent(repoHubMatch[1]!);
     return new Response("", { status: 302, headers: { Location: `/repos/${encodeURIComponent(repo)}/ci` } });
+  }
+
+  // GET /ci/events → global SSE for all repos (includes repo, runner, status in event data)
+  if (path === "/ci/events" && req.method === "GET") {
+    return handleGlobalCiEvents();
   }
 
   // CI routes: /repos/:name/ci[/...]
@@ -554,6 +575,35 @@ function handleCiEvents(repo: string): Response {
         catch { /* disconnected */ }
       };
       unsub = subscribeCiRunEvents(repo, send);
+      pingTimer = setInterval(() => {
+        try { controller.enqueue(encoder.encode(": ping\n\n")); }
+        catch { clearInterval(pingTimer); }
+      }, 25_000);
+      controller.enqueue(encoder.encode(": connected\n\n"));
+    },
+    cancel() { unsub?.(); clearInterval(pingTimer); },
+  });
+
+  return new Response(stream, {
+    status: 200,
+    headers: { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" },
+  });
+}
+
+function handleGlobalCiEvents(): Response {
+  const encoder = new TextEncoder();
+  let unsub: (() => void) | undefined;
+  let pingTimer: ReturnType<typeof setInterval> | undefined;
+
+  const stream = new ReadableStream({
+    start(controller) {
+      const send: GlobalCiRunSend = (repo, runner, status) => {
+        try {
+          const data = JSON.stringify({ repo, runner, status });
+          controller.enqueue(encoder.encode(`event: run-changed\ndata: ${data}\n\n`));
+        } catch { /* disconnected */ }
+      };
+      unsub = subscribeGlobalCiRunEvents(send);
       pingTimer = setInterval(() => {
         try { controller.enqueue(encoder.encode(": ping\n\n")); }
         catch { clearInterval(pingTimer); }

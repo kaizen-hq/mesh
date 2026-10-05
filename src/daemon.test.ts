@@ -182,19 +182,20 @@ describe("Daemon notifications", () => {
     expect(count).toBe(2);
   });
 
-  it("notifyCiRunChanged() calls all registered callbacks with repo name", async () => {
+  it("notifyCiRunChanged() calls all registered callbacks with repo, runner, and status", async () => {
     const daemon = await Daemon.create(await makeTmpRoot(), makeConfig(), makeIdentity());
-    const calls: string[] = [];
-    daemon.ciRunChangedCallbacks.push((r) => calls.push(r));
-    daemon.notifyCiRunChanged("ci-repo");
-    expect(calls).toEqual(["ci-repo"]);
+    const calls: Array<[string, string, string]> = [];
+    daemon.ciRunChangedCallbacks.push((repo, runner, status) => calls.push([repo, runner, status]));
+    daemon.ciRunChangedCallbacks.push((repo, runner, status) => calls.push([`2:${repo}`, runner, status]));
+    daemon.notifyCiRunChanged("ci-repo", "alice", "running");
+    expect(calls).toEqual([["ci-repo", "alice", "running"], ["2:ci-repo", "alice", "running"]]);
   });
 
   it("notifications with no registered callbacks do not throw", async () => {
     const daemon = await Daemon.create(await makeTmpRoot(), makeConfig(), makeIdentity());
     expect(() => daemon.notifyIssueChanged("repo")).not.toThrow();
     expect(() => daemon.notifyStatusChanged()).not.toThrow();
-    expect(() => daemon.notifyCiRunChanged("repo")).not.toThrow();
+    expect(() => daemon.notifyCiRunChanged("repo", "runner-1", "queued")).not.toThrow();
   });
 });
 

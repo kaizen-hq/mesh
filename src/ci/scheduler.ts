@@ -13,7 +13,7 @@ export interface SchedulerCtx {
   ci: CiDomain;
   peers: PeerRegistry;
   repos: RepoRegistry;
-  notifyCiRunChanged(repo: string): void;
+  notifyCiRunChanged(repo: string, runner: string, status: string): void;
 }
 import type { Pipeline, PipelineRun, TriggerKind, RunnerRequirements } from "./types.ts";
 import type { CiMessage } from "../proto.ts";
@@ -283,7 +283,7 @@ async function assignWithFallback(
       run.runner = peer;
       state.ci.setRun(run);
       void saveRun(state.root, run).catch(() => {});
-      state.notifyCiRunChanged(run.repo);
+      state.notifyCiRunChanged(run.repo, run.runner, run.status);
       // Store context so we can fall back to local if the peer declines.
       state.ci.setPendingAssignment(run.run_id, { pipeline, trigger });
       return;
@@ -299,7 +299,7 @@ async function assignWithFallback(
     const failed = { ...run, status: "failed" as const };
     state.ci.setRun(failed);
     void saveRun(state.root, failed).catch(() => {});
-    state.notifyCiRunChanged(failed.repo);
+    state.notifyCiRunChanged(failed.repo, failed.runner, failed.status);
     return;
   }
 
@@ -389,12 +389,12 @@ export async function resolveShaviaIPeers(
 
 export function scheduleLocalRun(state: SchedulerCtx, pipeline: Pipeline, run: PipelineRun): void {
   state.ci.setRun(run);
-  state.notifyCiRunChanged(run.repo);
+  state.notifyCiRunChanged(run.repo, run.runner, run.status);
   void runLocalPipeline(state, pipeline, run).catch((e) => {
     console.log(`[ci] run ${run.run_id} crashed unexpectedly: ${(e as Error).message}`);
     const failed = { ...state.ci.getRun(run.run_id) ?? run, status: "failed" as const };
     state.ci.setRun(failed);
-    state.notifyCiRunChanged(run.repo);
+    state.notifyCiRunChanged(failed.repo, failed.runner, failed.status);
   });
 }
 
@@ -419,7 +419,7 @@ async function runLocalPipeline(state: SchedulerCtx, pipeline: Pipeline, run: Pi
     secrets: state.ci.secrets,
     onRunUpdate: async (updated) => {
       state.ci.setRun(updated);
-      state.notifyCiRunChanged(updated.repo);
+      state.notifyCiRunChanged(updated.repo, updated.runner, updated.status);
     },
   });
 

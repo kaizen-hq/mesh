@@ -470,3 +470,94 @@ describe("multi-address fallback", () => {
     expect(alice.daemon.outbound.destinations()).toContain("bob");
   });
 });
+
+// ---------- GET /ci/events — global CI SSE ----------
+
+describe("GET /ci/events", () => {
+  it("returns 200 with text/event-stream content-type", async () => {
+    const id = await makeIdentity();
+    const node = await startNode("alice", id, []);
+    nodes.push(node);
+
+    const res = await fetch(`${node.baseUrl}/ci/events`);
+    const reader = res.body!.getReader();
+    await reader.cancel();
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/event-stream");
+  });
+
+  it("sends : connected comment immediately on connect", async () => {
+    const id = await makeIdentity();
+    const node = await startNode("alice", id, []);
+    nodes.push(node);
+
+    const res = await fetch(`${node.baseUrl}/ci/events`);
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+
+    const { value } = await reader.read();
+    await reader.cancel();
+
+    expect(decoder.decode(value)).toContain(": connected");
+  });
+
+  it("delivers run-changed event with repo, runner, and status when notifyCiRunChanged fires", async () => {
+    const id = await makeIdentity();
+    const node = await startNode("alice", id, []);
+    nodes.push(node);
+
+    const res = await fetch(`${node.baseUrl}/ci/events`);
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+
+    // Consume the initial `: connected` chunk
+    await reader.read();
+
+    // Trigger a CI run change notification
+    node.daemon.notifyCiRunChanged("my-repo", "alice", "running");
+
+    const { value } = await reader.read();
+    await reader.cancel();
+
+    const text = decoder.decode(value);
+    expect(text).toContain("event: run-changed");
+    const dataLine = text.split("\n").find((l) => l.startsWith("data:"))!;
+    const payload = JSON.parse(dataLine.slice("data:".length).trim());
+    expect(payload).toEqual({ repo: "my-repo", runner: "alice", status: "running" });
+  });
+
+  it("multiple concurrent subscribers each receive the event", async () => {
+    const id = await makeIdentity();
+    const node = await startNode("alice", id, []);
+    nodes.push(node);
+
+    const [res1, res2] = await Promise.all([
+      fetch(`${node.baseUrl}/ci/events`),
+      fetch(`${node.baseUrl}/ci/events`),
+    ]);
+
+    const reader1 = res1.body!.getReader();
+    const reader2 = res2.body!.getReader();
+    const decoder = new TextDecoder();
+
+    // Consume the `: connected` chunks
+    await reader1.read();
+    await reader2.read();
+
+    node.daemon.notifyCiRunChanged("repo-z", "bob", "success");
+
+    const [chunk1, chunk2] = await Promise.all([reader1.read(), reader2.read()]);
+
+    await reader1.cancel();
+    await reader2.cancel();
+
+    for (const chunk of [chunk1, chunk2]) {
+      const text = decoder.decode(chunk.value);
+      expect(text).toContain("event: run-changed");
+      const dataLine = text.split("\n").find((l) => l.startsWith("data:"))!;
+      const payload = JSON.parse(dataLine.slice("data:".length).trim());
+      expect(payload).toEqual({ repo: "repo-z", runner: "bob", status: "success" });
+    }
+  });
+});

@@ -29,7 +29,7 @@ export class Daemon {
   // SSE callbacks — registered by http_server, fired by Daemon.
   issueChangedCallbacks: Array<(repo: string) => void> = [];
   statusChangedCallbacks: Array<() => void> = [];
-  ciRunChangedCallbacks: Array<(repo: string) => void> = [];
+  ciRunChangedCallbacks: Array<(repo: string, runner: string, status: string) => void> = [];
   repoDeletionCallbacks: Array<(repo: string) => void> = [];
 
   // Repo lifecycle callbacks — registered by main.ts, fired by control/http_server.
@@ -100,8 +100,8 @@ export class Daemon {
     for (const cb of this.statusChangedCallbacks) cb();
   }
 
-  notifyCiRunChanged(repo: string): void {
-    for (const cb of this.ciRunChangedCallbacks) cb(repo);
+  notifyCiRunChanged(repo: string, runner: string, status: string): void {
+    for (const cb of this.ciRunChangedCallbacks) cb(repo, runner, status);
   }
 
   broadcastRepoDeletion(repo: string): void {
