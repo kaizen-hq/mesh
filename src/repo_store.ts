@@ -264,33 +264,11 @@ async function _reconcileFromPeer(
   const remotePrefix = `refs/remotes/${peer}/`;
   const remoteRefs = await git.listRefs(dir, remotePrefix);
 
-  // Build a set of deny_path prefixes for this peer+repo combination.
-  // Skip the check entirely when the peer's pubkey is unknown — an empty string
-  // could silently match misconfigured policy entries.
-  const peerPubkey = state.peers.getPubkey(peer);
-  const deniedPrefixes = peerPubkey
-    ? state.config.repo_policies
-        .filter((p) => p.repo === repo && p.peer === peerPubkey)
-        .flatMap((p) => p.deny_paths)
-    : [];
-
-  async function isDenied(fromSha: string | null, toSha: string): Promise<boolean> {
-    if (deniedPrefixes.length === 0) return false;
-    const paths = await git.changedPaths(dir, fromSha, toSha);
-    return paths.some((p) => deniedPrefixes.some((prefix) => p.startsWith(prefix)));
-  }
-
   for (const [branch, theirSha] of remoteRefs) {
     const localRef = `refs/heads/${branch}`;
     const replicaRef = `refs/replicas/${peer}/heads/${branch}`;
     const localSha = await git.refSha(dir, localRef);
     if (!localSha) {
-      if (await isDenied(null, theirSha)) {
-        console.warn(`repo_policy: blocking ${peer} (${peerPubkey}) from creating ${repo}#${branch} — touches denied path`);
-        await git.updateRef(dir, replicaRef, theirSha);
-        divergent.push({ peer, branch, replica_ref: replicaRef, their_sha: theirSha });
-        continue;
-      }
       await git.updateRef(dir, localRef, theirSha);
       advanced.push(branch);
       await git.deleteRef(dir, replicaRef);
@@ -301,15 +279,9 @@ async function _reconcileFromPeer(
       continue;
     }
     if (await git.isAncestor(dir, localSha, theirSha)) {
-      if (await isDenied(localSha, theirSha)) {
-        console.warn(`repo_policy: blocking ${peer} (${peerPubkey}) from advancing ${repo}#${branch} — touches denied path`);
-        await git.updateRef(dir, replicaRef, theirSha);
-        divergent.push({ peer, branch, replica_ref: replicaRef, their_sha: theirSha });
-      } else {
-        await git.updateRef(dir, localRef, theirSha);
-        advanced.push(branch);
-        await git.deleteRef(dir, replicaRef);
-      }
+      await git.updateRef(dir, localRef, theirSha);
+      advanced.push(branch);
+      await git.deleteRef(dir, replicaRef);
     } else if (await git.isAncestor(dir, theirSha, localSha)) {
       await git.deleteRef(dir, replicaRef);
     } else {

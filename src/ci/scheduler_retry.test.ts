@@ -102,7 +102,6 @@ async function makeCtx(root: string, peerSpecs: PeerSpec[], opts: { runnerEnable
       },
       transport: { tls: false, poll_secs: 30 },
       peers: [],
-      repo_policies: [],
       source_path: "",
     },
     ci,

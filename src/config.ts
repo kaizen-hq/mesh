@@ -24,21 +24,11 @@ export interface TransportSection {
   poll_secs: number;
 }
 
-export interface RepoPolicyEntry {
-  /** Repo name (without .git suffix) */
-  repo: string;
-  /** Peer pubkey string, e.g. "ed25519:<base64>" */
-  peer: string;
-  /** Path prefixes the peer is not allowed to modify */
-  deny_paths: string[];
-}
-
 export interface Config {
   self: SelfSection;
   peers: PeerEntry[];
   transport: TransportSection;
   runner: RunnerConfig;
-  repo_policies: RepoPolicyEntry[];
   source_path: string;
 }
 
@@ -58,7 +48,7 @@ export const DEFAULT_RUNNER: RunnerConfig = {
   log_retention_runs: 50,
 };
 
-const KNOWN_TOP_LEVEL = new Set(["self", "peers", "transport", "runner", "repo_policy"]);
+const KNOWN_TOP_LEVEL = new Set(["self", "peers", "transport", "runner"]);
 const KNOWN_SELF = new Set(["name", "peer_port"]);
 const KNOWN_TRANSPORT = new Set(["tls", "poll_secs"]);
 const KNOWN_RUNNER = new Set([
@@ -147,30 +137,11 @@ export async function loadConfig(file: string): Promise<Config> {
       typeof rr.log_retention_runs === "number" ? rr.log_retention_runs : DEFAULT_RUNNER.log_retention_runs,
   };
 
-  const repoPolicies: RepoPolicyEntry[] = [];
-  const KNOWN_REPO_POLICY = new Set(["repo", "peer", "deny_paths"]);
-  if (Array.isArray(t["repo_policy"])) {
-    for (const rp of t["repo_policy"] as Record<string, unknown>[]) {
-      warnUnknown(file, "repo_policy", rp, KNOWN_REPO_POLICY);
-      const repo = typeof rp.repo === "string" ? rp.repo.trim() : "";
-      const peer = typeof rp.peer === "string" ? rp.peer.trim() : "";
-      const deny_paths = Array.isArray(rp.deny_paths)
-        ? (rp.deny_paths as unknown[]).filter((p): p is string => typeof p === "string")
-        : [];
-      if (!repo || !peer) {
-        console.warn(`${file}: [[repo_policy]] entry missing repo or peer — skipped`);
-        continue;
-      }
-      repoPolicies.push({ repo, peer, deny_paths });
-    }
-  }
-
   return {
     self: { name, peer_port },
     peers,
     transport,
     runner,
-    repo_policies: repoPolicies,
     source_path: file,
   };
 }
