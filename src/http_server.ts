@@ -295,7 +295,7 @@ async function routeRequest(state: Daemon, views: Views, req: Request, server: a
 
   // GET /ci/events → global SSE for all repos (includes repo, runner, status in event data)
   if (path === "/ci/events" && req.method === "GET") {
-    return handleGlobalCiEvents();
+    return handleGlobalCiEvents(state);
   }
 
   // CI routes: /repos/:name/ci[/...]
@@ -590,7 +590,7 @@ function handleCiEvents(repo: string): Response {
   });
 }
 
-function handleGlobalCiEvents(): Response {
+function handleGlobalCiEvents(state: Daemon): Response {
   const encoder = new TextEncoder();
   let unsub: (() => void) | undefined;
   let pingTimer: ReturnType<typeof setInterval> | undefined;
@@ -609,6 +609,17 @@ function handleGlobalCiEvents(): Response {
         catch { clearInterval(pingTimer); }
       }, 25_000);
       controller.enqueue(encoder.encode(": connected\n\n"));
+      // Backfill current state for a reconnecting client:
+      //   - running runs: proxy needs these to open a session it missed
+      //   - recently-completed runs (last 5 min): proxy needs these to close
+      //     a stale session it held when the connection dropped mid-terminal-event
+      const cutoff = Date.now() - 5 * 60 * 1000;
+      for (const run of state.ci.allRuns()) {
+        const isRunning = run.status === "running";
+        const isRecentlyDone = run.completed_at !== undefined &&
+          Date.parse(run.completed_at) >= cutoff;
+        if (isRunning || isRecentlyDone) send(run.repo, run.runner, run.status);
+      }
     },
     cancel() { unsub?.(); clearInterval(pingTimer); },
   });

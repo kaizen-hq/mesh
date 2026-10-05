@@ -527,6 +527,137 @@ describe("GET /ci/events", () => {
     expect(payload).toEqual({ repo: "my-repo", runner: "alice", status: "running" });
   });
 
+  it("emits run-changed for already-running jobs immediately on connect", async () => {
+    const id = await makeIdentity();
+    const node = await startNode("alice", id, []);
+    nodes.push(node);
+
+    // Seed an in-progress run directly into the CI domain (simulates a build
+    // that started before this client connected — the reconnect scenario).
+    const run = {
+      run_id: "run-already-running",
+      repo: "my-app",
+      ref: "refs/heads/main",
+      sha: "abc1234",
+      triggered_by: { type: "push" as const, pusher: "alice" },
+      runner: "alice",
+      status: "running" as const,
+      started_at: new Date().toISOString(),
+      jobs: {},
+    };
+    node.daemon.ci.setRun(run);
+
+    const res = await fetch(`${node.baseUrl}/ci/events`);
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+
+    // Read chunks until we find a run-changed event (first chunk is `: connected`,
+    // second should be the backfilled run-changed for the already-running build).
+    let runChangedPayload: unknown = null;
+    for (let i = 0; i < 5; i++) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const text = decoder.decode(value);
+      if (text.includes("event: run-changed")) {
+        const dataLine = text.split("\n").find((l) => l.startsWith("data:"))!;
+        runChangedPayload = JSON.parse(dataLine.slice("data:".length).trim());
+        break;
+      }
+    }
+    await reader.cancel();
+
+    expect(runChangedPayload).toEqual({ repo: "my-app", runner: "alice", status: "running" });
+  });
+
+  it("emits run-changed for recently-completed runs on connect to clear stale sessions", async () => {
+    const id = await makeIdentity();
+    const node = await startNode("alice", id, []);
+    nodes.push(node);
+
+    // Seed a run that completed 2 minutes ago (within the 5-minute backfill window).
+    // Simulates: proxy held activeRepo while connected, connection dropped before the
+    // terminal event arrived, proxy reconnects — it must receive the terminal event
+    // so it can clear the stale session.
+    const completedAt = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+    const run = {
+      run_id: "run-recently-done",
+      repo: "my-app",
+      ref: "refs/heads/main",
+      sha: "def5678",
+      triggered_by: { type: "push" as const, pusher: "alice" },
+      runner: "alice",
+      status: "passed" as const,
+      started_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+      completed_at: completedAt,
+      jobs: {},
+    };
+    node.daemon.ci.setRun(run);
+
+    const res = await fetch(`${node.baseUrl}/ci/events`);
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+
+    let runChangedPayload: unknown = null;
+    for (let i = 0; i < 5; i++) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const text = decoder.decode(value);
+      if (text.includes("event: run-changed")) {
+        const dataLine = text.split("\n").find((l) => l.startsWith("data:"))!;
+        runChangedPayload = JSON.parse(dataLine.slice("data:".length).trim());
+        break;
+      }
+    }
+    await reader.cancel();
+
+    expect(runChangedPayload).toEqual({ repo: "my-app", runner: "alice", status: "passed" });
+  });
+
+  it("does not backfill runs that completed more than 5 minutes ago", async () => {
+    const id = await makeIdentity();
+    const node = await startNode("alice", id, []);
+    nodes.push(node);
+
+    // Seed a run that completed 10 minutes ago — outside the backfill window.
+    const run = {
+      run_id: "run-old-done",
+      repo: "my-app",
+      ref: "refs/heads/main",
+      sha: "aaa0000",
+      triggered_by: { type: "push" as const, pusher: "alice" },
+      runner: "alice",
+      status: "passed" as const,
+      started_at: new Date(Date.now() - 15 * 60 * 1000).toISOString(),
+      completed_at: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+      jobs: {},
+    };
+    node.daemon.ci.setRun(run);
+
+    const res = await fetch(`${node.baseUrl}/ci/events`);
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+
+    // Collect all chunks we receive in the initial burst (after `: connected`)
+    const chunks: string[] = [];
+    const { value: connectedChunk } = await reader.read();
+    chunks.push(decoder.decode(connectedChunk));
+
+    // Use a short timeout to drain any immediately-available chunks
+    const deadline = Date.now() + 200;
+    while (Date.now() < deadline) {
+      const raceResult = await Promise.race([
+        reader.read(),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), deadline - Date.now())),
+      ]);
+      if (raceResult === null || raceResult.done) break;
+      chunks.push(decoder.decode(raceResult.value));
+    }
+    await reader.cancel();
+
+    const allText = chunks.join("");
+    expect(allText).not.toContain("event: run-changed");
+  });
+
   it("multiple concurrent subscribers each receive the event", async () => {
     const id = await makeIdentity();
     const node = await startNode("alice", id, []);
