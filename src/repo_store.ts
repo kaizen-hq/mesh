@@ -9,11 +9,37 @@ import type { RepoStatus, BranchStatus } from "./proto.ts";
 import type { PeerRegistry } from "./peer_registry.ts";
 import * as git from "./git.ts";
 
+// ---------- per-repo mutex ----------
+
+/**
+ * Serializes concurrent operations on the same repo name.
+ * Uses promise-chaining so callers queue behind each other without blocking
+ * the event loop.
+ */
+export class RepoLockMap {
+  private locks: Map<string, Promise<void>> = new Map();
+
+  async withLock<T>(name: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.locks.get(name) ?? Promise.resolve();
+    let release!: () => void;
+    const next = new Promise<void>((r) => (release = r));
+    this.locks.set(name, next);
+    try {
+      await prev;
+      return await fn();
+    } finally {
+      release();
+      if (this.locks.get(name) === next) this.locks.delete(name);
+    }
+  }
+}
+
 export interface RepoStoreCtx {
   config: Config;
   root: string;
   repos: RepoRegistry;
   peers: PeerRegistry;
+  repoLocks: RepoLockMap;
 }
 
 // ---------- paths ----------
@@ -84,18 +110,22 @@ export async function deleteTombstone(root: string, repo: string): Promise<void>
 }
 
 export async function deleteRepo(state: RepoStoreCtx, name: string, tombstone: TombstoneRecord): Promise<void> {
+  // Write tombstone FIRST so deletion is durable and blocks re-introduction
+  // even if the file cleanup below is interrupted (e.g. process crash).
+  await saveTombstone(state.root, name, tombstone);
+  // Remove from the in-memory registry immediately after the tombstone is on
+  // disk, so no new operations (reconcile, heartbeat ensure) can act on it.
+  state.repos.delete(name);
+  // Best-effort cleanup — these are not load-bearing for correctness.
   const dir = mirrorPath(state.root, name);
   if (await exists(dir)) {
     await fs.rm(dir, { recursive: true, force: true });
   }
-  const meta = metaPath(state.root, name);
   try {
-    await fs.unlink(meta);
+    await fs.unlink(metaPath(state.root, name));
   } catch {
     // meta file may not exist
   }
-  await saveTombstone(state.root, name, tombstone);
-  state.repos.delete(name);
 }
 
 // ---------- startup scan ----------
@@ -186,6 +216,19 @@ export async function reconcileFromPeer(
   peer: string,
   repo: string,
 ): Promise<ReconcileOutcome> {
+  return state.repoLocks.withLock(repo, () => _reconcileFromPeer(state, peer, repo));
+}
+
+async function _reconcileFromPeer(
+  state: RepoStoreCtx,
+  peer: string,
+  repo: string,
+): Promise<ReconcileOutcome> {
+  // Re-check tombstone under lock — a deletion may have landed while we were
+  // waiting to acquire the lock or while we were queued by scheduleReconcileIfStale.
+  const tombstone = await loadTombstone(state.root, repo);
+  if (tombstone) return { advanced: [], divergent: [] };
+
   const dir = mirrorPath(state.root, repo);
   if (!(await exists(dir))) await git.initBare(dir);
 

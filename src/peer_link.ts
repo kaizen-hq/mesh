@@ -7,6 +7,7 @@ import type { RepoRegistry } from "./repo_registry.ts";
 import type { OutboundQueues } from "./outbound_queues.ts";
 import type { CiDomain } from "./ci/ci_domain.ts";
 import type { Identity } from "./identity.ts";
+import type { RepoLockMap } from "./repo_store.ts";
 
 export interface PeerLinkCtx {
   config: Config;
@@ -14,6 +15,7 @@ export interface PeerLinkCtx {
   identity: Identity;
   peers: PeerRegistry;
   repos: RepoRegistry;
+  repoLocks: RepoLockMap;
   outbound: OutboundQueues;
   ci: CiDomain;
   notifyStatusChanged(): void;
@@ -84,10 +86,13 @@ export async function handleInboundFrame(
       void (async () => {
         for (const r of msg.repos) {
           if (!isValidRepoName(r.name)) continue;
-          const tombstone = await repoStore.loadTombstone(state.root, r.name);
-          if (tombstone) {
-            await sendRepoDeletedTo(state, sender, r.name, tombstone.deleted_at);
-          }
+          await state.repoLocks.withLock(r.name, async () => {
+            const tombstone = await repoStore.loadTombstone(state.root, r.name);
+            if (tombstone) {
+              state.repos.delete(r.name);
+              await sendRepoDeletedTo(state, sender, r.name, tombstone.deleted_at);
+            }
+          });
         }
       })();
       const validRepos = msg.repos.filter((r) => isValidRepoName(r.name));
@@ -128,19 +133,23 @@ export async function handleInboundFrame(
     case "RepoDeleted":
       void (async () => {
         try {
-          const meta = await repoStore.loadRepoMeta(state.root, msg.repo);
-          if (meta && meta.introduced_at > msg.deleted_at) {
-            // Our copy was created after this deletion — ignore it
-            return;
-          }
-          const tombstone = { deleted_by: sender, deleted_at: msg.deleted_at };
-          if (state.repos.has(msg.repo)) {
-            await repoStore.deleteRepo(state, msg.repo, tombstone);
-          } else {
-            // Write tombstone even if we don't have the repo locally, to block re-introduction
-            await repoStore.saveTombstone(state.root, msg.repo, tombstone);
-          }
-          state.notifyStatusChanged();
+          await state.repoLocks.withLock(msg.repo, async () => {
+            // Re-read metadata under lock so we don't act on a stale snapshot
+            // that predates a concurrent RepoCreated.
+            const meta = await repoStore.loadRepoMeta(state.root, msg.repo);
+            if (meta && meta.introduced_at > msg.deleted_at) {
+              // Our copy was created after this deletion — ignore it
+              return;
+            }
+            const tombstone = { deleted_by: sender, deleted_at: msg.deleted_at };
+            if (state.repos.has(msg.repo)) {
+              await repoStore.deleteRepo(state, msg.repo, tombstone);
+            } else {
+              // Write tombstone even if we don't have the repo locally, to block re-introduction
+              await repoStore.saveTombstone(state.root, msg.repo, tombstone);
+            }
+            state.notifyStatusChanged();
+          });
         } catch (e) {
           console.warn(`RepoDeleted handler failed (repo=${msg.repo}):`, (e as Error).message);
         }
@@ -150,16 +159,20 @@ export async function handleInboundFrame(
       void (async () => {
         try {
           if (!isValidRepoName(msg.repo)) return;
-          const tombstone = await repoStore.loadTombstone(state.root, msg.repo);
-          if (tombstone && msg.introduced_at <= tombstone.deleted_at) {
-            // This creation predates our tombstone — re-send the tombstone
-            await sendRepoDeletedTo(state, sender, msg.repo, tombstone.deleted_at);
-            return;
-          }
-          // Newer than tombstone (or no tombstone) — clear it and accept the repo
-          await repoStore.deleteTombstone(state.root, msg.repo);
-          state.repos.ensure(msg.repo).noteSource(sender);
-          state.notifyStatusChanged();
+          await state.repoLocks.withLock(msg.repo, async () => {
+            // Re-read tombstone under lock so we don't race a concurrent RepoDeleted
+            // that wrote a newer tombstone between our initial read and deleteTombstone().
+            const tombstone = await repoStore.loadTombstone(state.root, msg.repo);
+            if (tombstone && msg.introduced_at <= tombstone.deleted_at) {
+              // This creation predates our tombstone — re-send the tombstone
+              await sendRepoDeletedTo(state, sender, msg.repo, tombstone.deleted_at);
+              return;
+            }
+            // Newer than tombstone (or no tombstone) — clear it and accept the repo
+            await repoStore.deleteTombstone(state.root, msg.repo);
+            state.repos.ensure(msg.repo).noteSource(sender);
+            state.notifyStatusChanged();
+          });
         } catch (e) {
           console.warn(`RepoCreated handler failed (repo=${msg.repo}):`, (e as Error).message);
         }

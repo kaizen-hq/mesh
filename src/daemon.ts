@@ -11,12 +11,14 @@ import { PeerRegistry } from "./peer_registry.ts";
 import { RepoRegistry } from "./repo_registry.ts";
 import { OutboundQueues } from "./outbound_queues.ts";
 import { CiDomain } from "./ci/ci_domain.ts";
+import { RepoLockMap } from "./repo_store.ts";
 
 export type PendingInvite = PersistedInvite;
 
 export class Daemon {
   readonly peers: PeerRegistry;
   readonly repos: RepoRegistry;
+  readonly repoLocks: RepoLockMap;
   readonly outbound: OutboundQueues;
   readonly ci: CiDomain;
 
@@ -51,6 +53,7 @@ export class Daemon {
     this.identity = identity;
     this.peers = peers;
     this.repos = repos;
+    this.repoLocks = new RepoLockMap();
     this.outbound = new OutboundQueues();
     this.ci = new CiDomain();
     this.shutdownPromise = new Promise((res) => (this.shutdownResolve = res));

@@ -11,6 +11,7 @@ import {
   saveTombstone,
   deleteTombstone,
   deleteRepo,
+  RepoLockMap,
   type RepoMeta,
   type TombstoneRecord,
   type RepoStoreCtx,
@@ -190,6 +191,7 @@ function makeCtx(root: string): RepoStoreCtx {
   return {
     root,
     repos: RepoRegistry.create(),
+    repoLocks: new RepoLockMap(),
     config: null as unknown as Config,
     peers: null as unknown as InstanceType<typeof PeerRegistry>,
   };
