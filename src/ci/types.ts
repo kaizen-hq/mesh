@@ -28,6 +28,12 @@ export interface JobDefinition {
   commands: string[];
   depends_on: string[];
   secrets: string[];
+  // Set to true to allow this job to push to the mesh daemon.
+  // The runner will inject MESH_PUSH_TOKEN into the job's environment.
+  push?: boolean;
+  // Shell-mode only: set to true if the job needs outbound network access.
+  // By default shell jobs run in an isolated network namespace on Linux.
+  network?: boolean;
 }
 
 // ---------- runtime run state ----------

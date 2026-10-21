@@ -115,6 +115,51 @@ function redactSecrets(line: string, secrets: Record<string, string>): string {
   return out;
 }
 
+// ---------- security helpers (exported for testing) ----------
+
+/**
+ * Throws if the compose file content contains unsafe options that would
+ * allow a container to reach the mesh daemon or gain host privileges.
+ */
+export function validateComposeFile(content: string, jobName: string): void {
+  if (/network_mode\s*:\s*["']?host["']?/.test(content)) {
+    throw new Error(
+      `job "${jobName}": network_mode: host is not permitted in CI compose files`,
+    );
+  }
+  if (/^\s+privileged\s*:\s*true/m.test(content)) {
+    throw new Error(
+      `job "${jobName}": privileged: true is not permitted in CI compose files`,
+    );
+  }
+}
+
+/**
+ * Returns the argv for a shell command, wrapping with `unshare --net` on
+ * Linux when network isolation is requested.
+ */
+export function buildShellCmdArgs(cmd: string, netIsolate: boolean): string[] {
+  return netIsolate
+    ? ["unshare", "--net", "sh", "-c", cmd]
+    : ["sh", "-c", cmd];
+}
+
+/**
+ * Merges run-level secrets with job-level overrides. Injects MESH_PUSH_TOKEN
+ * only when the job declares push: true and a token is available.
+ */
+export function buildJobSecrets(
+  runSecrets: Record<string, string>,
+  job: JobDefinition,
+  pushToken?: string,
+): Record<string, string> {
+  const jobSecrets: Record<string, string> = { ...runSecrets };
+  if (job.push && pushToken) {
+    jobSecrets["MESH_PUSH_TOKEN"] = pushToken;
+  }
+  return jobSecrets;
+}
+
 // ---------- docker execution ----------
 
 async function runDockerJob(
@@ -129,6 +174,8 @@ async function runDockerJob(
 
   if (job.compose && job.service) {
     composeFile = path.join(worktree, job.compose);
+    const raw = await fs.readFile(composeFile, "utf8").catch(() => "");
+    validateComposeFile(raw, jobName);
   } else if (job.image) {
     // Generate an ephemeral docker-compose.yml
     const secretEnv = job.secrets
@@ -215,9 +262,15 @@ async function runShellJob(
   onLog: (line: string) => Promise<void>,
 ): Promise<number> {
   const env = buildShellEnv(envPassthrough, secrets);
+  // On Linux, run shell commands in an isolated network namespace unless the
+  // job explicitly opts in with network: true. This prevents a malicious
+  // command (e.g. a postinstall script) from reaching the mesh daemon on
+  // localhost even though it runs as the host process.
+  const netIsolate = process.platform === "linux" && !job.network;
   let lastExit = 0;
   for (const cmd of job.commands) {
-    const exit = await spawnAndLog("sh", ["-c", cmd], { cwd: worktree, env }, secrets, onLog);
+    const argv = buildShellCmdArgs(cmd, netIsolate);
+    const exit = await spawnAndLog(argv[0]!, argv.slice(1), { cwd: worktree, env }, secrets, onLog);
     if (exit !== 0) return exit;
     lastExit = exit;
   }
@@ -302,6 +355,8 @@ export interface RunPipelineOptions {
   repoPath: string;
   runnerConfig: RunnerConfig;
   secrets: Record<string, string>;
+  // When set, injected as MESH_PUSH_TOKEN into jobs that declare push: true.
+  pushToken?: string;
   onLog?: (runId: string, jobName: string, line: string) => Promise<void>;
   onRunUpdate?: (run: PipelineRun) => Promise<void>;
 }
@@ -371,12 +426,14 @@ export async function runPipeline(
         await opts.onLog?.(run.run_id, jobName, line);
       };
 
+      const jobSecrets = buildJobSecrets(secrets, jobDef, opts.pushToken);
+
       let exitCode: number;
       try {
         if (jobDef.mode === "shell") {
-          exitCode = await runShellJob(jobDef, worktree, secrets, runnerConfig.env_passthrough, onLog);
+          exitCode = await runShellJob(jobDef, worktree, jobSecrets, runnerConfig.env_passthrough, onLog);
         } else {
-          exitCode = await runDockerJob(jobDef, jobName, worktree, secrets, onLog);
+          exitCode = await runDockerJob(jobDef, jobName, worktree, jobSecrets, onLog);
         }
       } catch (e) {
         await onLog(`[mesh-ci] job "${jobName}" threw: ${(e as Error).message}\n`);

@@ -411,17 +411,32 @@ async function runLocalPipeline(state: SchedulerCtx, pipeline: Pipeline, run: Pi
 
   const worktreePath = mirrorPath;
 
+  // Mint a short-lived push token for this run. Jobs that declare push: true
+  // receive it as MESH_PUSH_TOKEN; the git-receive-pack handler requires it,
+  // so only those jobs can push to the daemon — and every push is attributed.
+  const pushToken = crypto.randomUUID();
+  state.ci.setPushToken(pushToken, run.run_id);
+
   const started = Date.now();
-  const completed = await runPipeline(pipeline, run, {
-    root: state.root,
-    repoPath: worktreePath,
-    runnerConfig: state.config.runner,
-    secrets: state.ci.secrets,
-    onRunUpdate: async (updated) => {
-      state.ci.setRun(updated);
-      state.notifyCiRunChanged(updated.repo, updated.runner, updated.status);
-    },
-  });
+  // Initialised here; overwritten by runPipeline unless it throws (in which
+  // case the exception propagates and `completed` is never read).
+  let completed: PipelineRun = run;
+  try {
+    completed = await runPipeline(pipeline, run, {
+      root: state.root,
+      repoPath: worktreePath,
+      runnerConfig: state.config.runner,
+      secrets: state.ci.secrets,
+      pushToken,
+      onRunUpdate: async (updated) => {
+        state.ci.setRun(updated);
+        state.notifyCiRunChanged(updated.repo, updated.runner, updated.status);
+      },
+    });
+  } finally {
+    // Always revoke the push token when the run ends, regardless of outcome.
+    state.ci.deletePushToken(pushToken);
+  }
 
   const duration = Date.now() - started;
   console.log(`[ci] run ${run.run_id} completed: status=${completed.status} duration=${duration}ms`);

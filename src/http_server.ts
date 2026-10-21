@@ -652,6 +652,10 @@ async function handleGit(state: Daemon, req: Request, url: URL, server: any): Pr
   const parsed = parseGitPath(url.pathname);
   if (!parsed) return textResponse(404, "not a mesh route");
 
+  // ciRunId is resolved from the X-Mesh-Run-Token header for git-receive-pack
+  // requests and used for audit attribution throughout this handler.
+  let ciRunId: string | null = null;
+
   const method = req.method;
   let service: gitp.GitService;
   let op: "info" | "pack";
@@ -672,13 +676,23 @@ async function handleGit(state: Daemon, req: Request, url: URL, server: any): Pr
     return textResponse(404, "no such mesh route");
   }
 
-  // git-receive-pack (push) is restricted to localhost — peers replicate by
-  // fetching (git-upload-pack), not by pushing.  Blocking remote pushes closes
-  // the unauthenticated-push → malicious-pipeline → RCE chain.
+  // git-receive-pack (push) is restricted to localhost and requires a valid
+  // per-run push token. The token is minted by the scheduler at run start,
+  // injected only into jobs with push: true, and revoked when the run ends.
+  // This means a compromised build step (postinstall script, rogue tool) can
+  // never push even from localhost — it will never have the token.
   if (service === "git-receive-pack") {
     const remoteIp = server?.requestIP?.(req)?.address ?? "";
     if (!isLoopback(remoteIp)) {
       return textResponse(403, "git push is only permitted from localhost");
+    }
+    const token = req.headers.get("x-mesh-run-token") ?? "";
+    ciRunId = token ? state.ci.consumePushToken(token) : null;
+    if (!ciRunId) {
+      return textResponse(
+        403,
+        "git push requires a valid X-Mesh-Run-Token header — add push: true to the job in mesh-ci.yml",
+      );
     }
   }
 
@@ -713,7 +727,7 @@ async function handleGit(state: Daemon, req: Request, url: URL, server: any): Pr
     await repoStore.deleteTombstone(state.root, parsed.repo);
     introducedAt = new Date().toISOString();
     await repoStore.saveRepoMeta(state.root, parsed.repo, {
-      introduced_by: state.config.self.name,
+      introduced_by: ciRunId ? `ci-run:${ciRunId}` : state.config.self.name,
       introduced_at: introducedAt,
     });
   }
@@ -749,6 +763,13 @@ async function handleGit(state: Daemon, req: Request, url: URL, server: any): Pr
       const head = await gitp.headSha(dir);
       if (head) local.lastHead = head;
       peerLink.broadcastRefUpdate(state, parsed.repo, changes, null);
+      // Audit log: every successful push is attributed to the CI run that
+      // held the push token. ciRunId is always non-null here (the token
+      // gate above would have rejected the request otherwise).
+      const pushRun = state.ci.getRun(ciRunId!);
+      console.log(
+        `[git] push to ${parsed.repo} run:${ciRunId} runner:${pushRun?.runner ?? "unknown"} node:${state.config.self.name} (${changes.length} ref change(s))`,
+      );
     }
     if (introducedAt) {
       peerLink.broadcastRepoCreated(state, parsed.repo, introducedAt, state.config.self.name);
