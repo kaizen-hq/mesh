@@ -21,6 +21,7 @@ import { runUpdate } from "./update.ts";
 import { loadSecretsConfig, detectTools, loadPipelineFromMirror } from "./ci/config.ts";
 import { checkCronSlots, type CronJobSpec } from "./ci/cron.ts";
 import { abandonStaleRuns } from "./ci/store.ts";
+import { loadOrCreateDirectPushToken } from "./push_token.ts";
 import pkg from "../package.json" with { type: "json" };
 
 // Source-paradigm commands need the mesh source tree on the real filesystem,
@@ -56,6 +57,7 @@ const USAGE_TAIL = `  start [flags]                     Run the foreground serve
   config set <section.key> <value>  set a mesh.toml value (no daemon needed)
   config get <section.key>          print a mesh.toml value
   update [--from PEER] [--ref TAG] [--force]  update to the latest release
+  push-token                        print the direct-push token for git remotes
   ci status [<repo>]                show recent pipeline runs
   ci run <repo> <ref>               manually trigger a pipeline
   ci logs <repo> <run_id>           print build log
@@ -252,6 +254,8 @@ async function main() {
           ref: (args.flags["ref"] as string) || undefined,
           force: !!args.flags["force"],
         });
+      case "push-token":
+        return await cmdPushToken(root);
       case "ci":
         return await cmdCi(root, args);
       default:
@@ -263,6 +267,18 @@ async function main() {
     process.exit(1);
   }
 }
+
+async function cmdPushToken(root: string) {
+  const token = await loadOrCreateDirectPushToken(root);
+  console.log(token);
+  console.log("");
+  console.log("Configure a git remote to use this token:");
+  console.log(`  git config http.extraHeader "X-Mesh-Run-Token: ${token}"`);
+  console.log("");
+  console.log("This token is only accepted from localhost. Keep it out of version control.");
+}
+
+// ----------
 
 async function ensureDirs(root: string) {
   await fs.mkdir(root, { recursive: true });
@@ -388,6 +404,9 @@ async function cmdStart(root: string, args: Args) {
 
   // Mark any runs left in "pending" or "running" from a previous daemon session as failed.
   await abandonStaleRuns(root);
+
+  // Load (or generate) the long-lived direct push token.
+  state.directPushToken = await loadOrCreateDirectPushToken(root);
 
   // Load secrets and detect capabilities from runner config in mesh.toml
   state.ci.secrets = await loadSecretsConfig(root);

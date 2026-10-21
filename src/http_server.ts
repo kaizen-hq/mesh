@@ -676,23 +676,30 @@ async function handleGit(state: Daemon, req: Request, url: URL, server: any): Pr
     return textResponse(404, "no such mesh route");
   }
 
-  // git-receive-pack (push) is restricted to localhost and requires a valid
-  // per-run push token. The token is minted by the scheduler at run start,
-  // injected only into jobs with push: true, and revoked when the run ends.
-  // This means a compromised build step (postinstall script, rogue tool) can
-  // never push even from localhost — it will never have the token.
+  // git-receive-pack (push) is restricted to localhost.
+  // When the CI runner is enabled, a valid token is also required — either a
+  // per-run CI token (minted by the scheduler, injected only into jobs with
+  // push: true) or the node's long-lived direct-push token (for human pushes).
+  // When the runner is disabled there are no build steps that could sneak a
+  // push in, so the loopback check alone is sufficient.
   if (service === "git-receive-pack") {
     const remoteIp = server?.requestIP?.(req)?.address ?? "";
     if (!isLoopback(remoteIp)) {
       return textResponse(403, "git push is only permitted from localhost");
     }
-    const token = req.headers.get("x-mesh-run-token") ?? "";
-    ciRunId = token ? state.ci.consumePushToken(token) : null;
-    if (!ciRunId) {
-      return textResponse(
-        403,
-        "git push requires a valid X-Mesh-Run-Token header — add push: true to the job in mesh-ci.yml",
-      );
+    if (state.config.runner.enabled) {
+      const token = req.headers.get("x-mesh-run-token") ?? "";
+      ciRunId = token ? state.ci.consumePushToken(token) : null;
+      if (!ciRunId) {
+        if (!token || token !== state.directPushToken) {
+          return textResponse(
+            403,
+            "git push requires a valid X-Mesh-Run-Token header — " +
+            "use `mesh push-token` to get the direct-push token, or add push: true to the CI job",
+          );
+        }
+        // Direct human push — ciRunId stays null; attributed to the node.
+      }
     }
   }
 
@@ -730,6 +737,7 @@ async function handleGit(state: Daemon, req: Request, url: URL, server: any): Pr
       introduced_by: ciRunId ? `ci-run:${ciRunId}` : state.config.self.name,
       introduced_at: introducedAt,
     });
+
   }
 
   if (op === "info") {
@@ -763,13 +771,17 @@ async function handleGit(state: Daemon, req: Request, url: URL, server: any): Pr
       const head = await gitp.headSha(dir);
       if (head) local.lastHead = head;
       peerLink.broadcastRefUpdate(state, parsed.repo, changes, null);
-      // Audit log: every successful push is attributed to the CI run that
-      // held the push token. ciRunId is always non-null here (the token
-      // gate above would have rejected the request otherwise).
-      const pushRun = state.ci.getRun(ciRunId!);
-      console.log(
-        `[git] push to ${parsed.repo} run:${ciRunId} runner:${pushRun?.runner ?? "unknown"} node:${state.config.self.name} (${changes.length} ref change(s))`,
-      );
+      // Audit log: attribute to CI run or direct human push.
+      if (ciRunId) {
+        const pushRun = state.ci.getRun(ciRunId);
+        console.log(
+          `[git] push to ${parsed.repo} run:${ciRunId} runner:${pushRun?.runner ?? "unknown"} node:${state.config.self.name} (${changes.length} ref change(s))`,
+        );
+      } else {
+        console.log(
+          `[git] push to ${parsed.repo} direct:${state.config.self.name} (${changes.length} ref change(s))`,
+        );
+      }
     }
     if (introducedAt) {
       peerLink.broadcastRepoCreated(state, parsed.repo, introducedAt, state.config.self.name);

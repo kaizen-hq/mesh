@@ -27,6 +27,11 @@ export class Daemon {
   identity: Identity;
   listenAddr: string | null = null;
   pendingInvites: Map<string, PendingInvite> = new Map();
+  // Long-lived token for direct (non-CI) pushes from localhost. Generated once
+  // at first start and stored at <root>/push-token. Use `mesh push-token` to
+  // view it; set it on a git remote with:
+  //   git config http.extraHeader "X-Mesh-Run-Token: <token>"
+  directPushToken: string = "";
 
   // SSE callbacks — registered by http_server, fired by Daemon.
   issueChangedCallbacks: Array<(repo: string) => void> = [];
