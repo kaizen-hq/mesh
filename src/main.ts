@@ -401,6 +401,23 @@ async function cmdStart(root: string, args: Args) {
     load: { jobs_running: 0, cpu_percent: 0, mem_free_mb: 0 },
   };
 
+  // Warn if shell jobs cannot be network-isolated on this host.
+  // unshare --net requires Linux and unprivileged user namespaces to be enabled
+  // (kernel.unprivileged_userns_clone=1 on some distros). Without it, Fix 2
+  // (shell network isolation) silently does nothing — shell jobs run with full
+  // host network access.
+  if (process.platform === "linux" && cfg.runner.execution_modes.includes("shell")) {
+    const probe = Bun.spawn(["unshare", "--net", "true"], { stdout: "ignore", stderr: "ignore" });
+    await probe.exited;
+    if (probe.exitCode !== 0) {
+      console.warn(
+        "[runner] WARNING: unshare --net is not available on this host. " +
+        "Shell jobs will run WITHOUT network namespace isolation. " +
+        "Set kernel.unprivileged_userns_clone=1 or run the runner as root to enable it.",
+      );
+    }
+  }
+
   const listen = (args.flags["listen"] as string) || "0.0.0.0:7979";
   const heartbeatSecs = Number(args.flags["heartbeat-secs"] ?? 15);
   const fetchSecs = Number(args.flags["fetch-secs"] ?? 60);
