@@ -21,7 +21,7 @@ import { runUpdate } from "./update.ts";
 import { loadSecretsConfig, detectTools, loadPipelineFromMirror } from "./ci/config.ts";
 import { checkCronSlots, type CronJobSpec } from "./ci/cron.ts";
 import { abandonStaleRuns } from "./ci/store.ts";
-import { loadOrCreateDirectPushToken } from "./push_token.ts";
+import { generateDirectPushToken, loadDirectPushTokenHash } from "./push_token.ts";
 import pkg from "../package.json" with { type: "json" };
 
 // Source-paradigm commands need the mesh source tree on the real filesystem,
@@ -269,13 +269,14 @@ async function main() {
 }
 
 async function cmdPushToken(root: string) {
-  const token = await loadOrCreateDirectPushToken(root);
+  const { token } = await generateDirectPushToken(root);
   console.log(token);
   console.log("");
   console.log("Configure a git remote to use this token:");
   console.log(`  git config http.extraHeader "X-Mesh-Run-Token: ${token}"`);
   console.log("");
   console.log("This token is only accepted from localhost. Keep it out of version control.");
+  console.log("Running this command again rotates the token and invalidates the old one.");
 }
 
 // ----------
@@ -405,8 +406,10 @@ async function cmdStart(root: string, args: Args) {
   // Mark any runs left in "pending" or "running" from a previous daemon session as failed.
   await abandonStaleRuns(root);
 
-  // Load (or generate) the long-lived direct push token.
-  state.directPushToken = await loadOrCreateDirectPushToken(root);
+  // Load the direct push token hash (written by `mesh push-token`).
+  // Null means the user hasn't run `mesh push-token` yet; direct pushes will
+  // be blocked until they do. The plaintext is never stored on disk.
+  state.directPushTokenHash = await loadDirectPushTokenHash(root) ?? "";
 
   // Load secrets and detect capabilities from runner config in mesh.toml
   state.ci.secrets = await loadSecretsConfig(root);

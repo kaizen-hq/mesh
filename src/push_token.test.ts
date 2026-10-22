@@ -2,9 +2,15 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { loadOrCreateDirectPushToken, PUSH_TOKEN_FILE } from "./push_token.ts";
+import {
+  generateDirectPushToken,
+  loadDirectPushTokenHash,
+  hashToken,
+  PUSH_TOKEN_HASH_FILE,
+} from "./push_token.ts";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const HEX64_RE = /^[0-9a-f]{64}$/;
 
 let tmpDir: string;
 
@@ -16,66 +22,88 @@ afterEach(async () => {
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
-describe("loadOrCreateDirectPushToken", () => {
-  it("creates a new token file when none exists", async () => {
-    const token = await loadOrCreateDirectPushToken(tmpDir);
-    const file = path.join(tmpDir, PUSH_TOKEN_FILE);
-    expect(await Bun.file(file).exists()).toBe(true);
-    expect(token).toBeTruthy();
+describe("hashToken", () => {
+  it("returns a 64-character hex string", async () => {
+    const h = await hashToken("some-token");
+    expect(HEX64_RE.test(h)).toBe(true);
   });
 
-  it("returns a valid UUID", async () => {
-    const token = await loadOrCreateDirectPushToken(tmpDir);
+  it("is deterministic", async () => {
+    expect(await hashToken("abc")).toBe(await hashToken("abc"));
+  });
+
+  it("different tokens produce different hashes", async () => {
+    expect(await hashToken("a")).not.toBe(await hashToken("b"));
+  });
+});
+
+describe("generateDirectPushToken", () => {
+  it("returns a valid UUID plaintext token", async () => {
+    const { token } = await generateDirectPushToken(tmpDir);
     expect(UUID_RE.test(token)).toBe(true);
   });
 
-  it("returns the same token on subsequent calls", async () => {
-    const first = await loadOrCreateDirectPushToken(tmpDir);
-    const second = await loadOrCreateDirectPushToken(tmpDir);
-    expect(first).toBe(second);
+  it("returns a 64-char hex hash", async () => {
+    const { hash } = await generateDirectPushToken(tmpDir);
+    expect(HEX64_RE.test(hash)).toBe(true);
   });
 
-  it("does not regenerate when the file already exists", async () => {
-    const first = await loadOrCreateDirectPushToken(tmpDir);
-    // Tamper with nothing — just call again
-    const second = await loadOrCreateDirectPushToken(tmpDir);
-    expect(second).toBe(first);
+  it("hash matches hashToken(token)", async () => {
+    const { token, hash } = await generateDirectPushToken(tmpDir);
+    expect(await hashToken(token)).toBe(hash);
   });
 
-  it("reads a token written externally without overwriting it", async () => {
-    const known = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
-    await fs.writeFile(path.join(tmpDir, PUSH_TOKEN_FILE), known + "\n");
-    const token = await loadOrCreateDirectPushToken(tmpDir);
-    expect(token).toBe(known);
+  it("writes the hash (not the token) to disk", async () => {
+    const { token, hash } = await generateDirectPushToken(tmpDir);
+    const onDisk = (await fs.readFile(path.join(tmpDir, PUSH_TOKEN_HASH_FILE), "utf8")).trim();
+    expect(onDisk).toBe(hash);
+    expect(onDisk).not.toContain(token);
   });
 
-  it("trims whitespace from an existing token file", async () => {
-    const known = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
-    await fs.writeFile(path.join(tmpDir, PUSH_TOKEN_FILE), `  ${known}  \n`);
-    const token = await loadOrCreateDirectPushToken(tmpDir);
-    expect(token).toBe(known);
+  it("writes the hash file with mode 0o600", async () => {
+    await generateDirectPushToken(tmpDir);
+    const stat = await fs.stat(path.join(tmpDir, PUSH_TOKEN_HASH_FILE));
+    expect(stat.mode & 0o777).toBe(0o600);
   });
 
-  it("creates a new token if the file exists but is empty", async () => {
-    await fs.writeFile(path.join(tmpDir, PUSH_TOKEN_FILE), "");
-    const token = await loadOrCreateDirectPushToken(tmpDir);
-    expect(UUID_RE.test(token)).toBe(true);
-  });
-
-  it("creates a new token if the file exists but contains only whitespace", async () => {
-    await fs.writeFile(path.join(tmpDir, PUSH_TOKEN_FILE), "   \n");
-    const token = await loadOrCreateDirectPushToken(tmpDir);
-    expect(UUID_RE.test(token)).toBe(true);
+  it("calling again rotates — returns a new token each time", async () => {
+    const first = await generateDirectPushToken(tmpDir);
+    const second = await generateDirectPushToken(tmpDir);
+    expect(first.token).not.toBe(second.token);
+    expect(first.hash).not.toBe(second.hash);
   });
 
   it("two different roots get independent tokens", async () => {
     const otherDir = await fs.mkdtemp(path.join(os.tmpdir(), "mesh-push-token-other-"));
     try {
-      const a = await loadOrCreateDirectPushToken(tmpDir);
-      const b = await loadOrCreateDirectPushToken(otherDir);
-      expect(a).not.toBe(b);
+      const a = await generateDirectPushToken(tmpDir);
+      const b = await generateDirectPushToken(otherDir);
+      expect(a.token).not.toBe(b.token);
     } finally {
       await fs.rm(otherDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("loadDirectPushTokenHash", () => {
+  it("returns null when no hash file exists", async () => {
+    expect(await loadDirectPushTokenHash(tmpDir)).toBeNull();
+  });
+
+  it("returns the stored hash after generate", async () => {
+    const { hash } = await generateDirectPushToken(tmpDir);
+    expect(await loadDirectPushTokenHash(tmpDir)).toBe(hash);
+  });
+
+  it("returns null for an empty hash file", async () => {
+    await fs.writeFile(path.join(tmpDir, PUSH_TOKEN_HASH_FILE), "");
+    expect(await loadDirectPushTokenHash(tmpDir)).toBeNull();
+  });
+
+  it("trims whitespace from the stored hash", async () => {
+    const { hash } = await generateDirectPushToken(tmpDir);
+    // Overwrite with extra whitespace
+    await fs.writeFile(path.join(tmpDir, PUSH_TOKEN_HASH_FILE), `  ${hash}  \n`);
+    expect(await loadDirectPushTokenHash(tmpDir)).toBe(hash);
   });
 });

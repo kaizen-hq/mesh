@@ -35,6 +35,7 @@ import * as ciHttp from "./ci/http.ts";
 import { loadRun, listRuns, readLog, tailLog } from "./ci/store.ts";
 import * as scheduler from "./ci/scheduler.ts";
 import { loadPipelineFromMirror } from "./ci/config.ts";
+import { hashToken } from "./push_token.ts";
 
 // ---------- repo name validation ----------
 
@@ -691,7 +692,8 @@ async function handleGit(state: Daemon, req: Request, url: URL, server: any): Pr
       const token = req.headers.get("x-mesh-run-token") ?? "";
       ciRunId = token ? state.ci.consumePushToken(token) : null;
       if (!ciRunId) {
-        if (!token || token !== state.directPushToken) {
+        const tokenHash = token ? await hashToken(token) : "";
+        if (!tokenHash || !state.directPushTokenHash || tokenHash !== state.directPushTokenHash) {
           return textResponse(
             403,
             "git push requires a valid X-Mesh-Run-Token header — " +
