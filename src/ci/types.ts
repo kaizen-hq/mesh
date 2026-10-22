@@ -128,6 +128,11 @@ export interface RunnerConfig {
   max_worktree_age_minutes: number;
   max_worktree_disk_mb: number;
   log_retention_runs: number;
+  // Whether to wrap shell jobs in `unshare --net` on Linux.
+  // Set to false on hosts where unprivileged user namespaces are disabled
+  // (e.g. hardened kernels, non-root runners without CAP_SYS_ADMIN).
+  // The startup probe auto-disables this if unshare is unavailable.
+  network_isolation: boolean;
 }
 
 export function emptyCiState(): CiState {

@@ -420,19 +420,21 @@ async function cmdStart(root: string, args: Args) {
     load: { jobs_running: 0, cpu_percent: 0, mem_free_mb: 0 },
   };
 
-  // Warn if shell jobs cannot be network-isolated on this host.
+  // Probe whether shell network isolation is usable on this host.
   // unshare --net requires Linux and unprivileged user namespaces to be enabled
-  // (kernel.unprivileged_userns_clone=1 on some distros). Without it, Fix 2
-  // (shell network isolation) silently does nothing — shell jobs run with full
-  // host network access.
-  if (process.platform === "linux" && cfg.runner.execution_modes.includes("shell")) {
+  // (kernel.unprivileged_userns_clone=1 on some distros, CAP_SYS_ADMIN otherwise).
+  // If unavailable, auto-disable network_isolation so shell jobs don't fail.
+  // The push token is the primary control; this is defence-in-depth only.
+  if (process.platform === "linux" && cfg.runner.execution_modes.includes("shell") && cfg.runner.network_isolation) {
     const probe = Bun.spawn(["unshare", "--net", "true"], { stdout: "ignore", stderr: "ignore" });
     await probe.exited;
     if (probe.exitCode !== 0) {
+      cfg.runner.network_isolation = false;
       console.warn(
-        "[runner] WARNING: unshare --net is not available on this host. " +
-        "Shell jobs will run WITHOUT network namespace isolation. " +
-        "Set kernel.unprivileged_userns_clone=1 or run the runner as root to enable it.",
+        "[runner] network_isolation disabled: unshare --net is not available on this host " +
+        "(unprivileged user namespaces blocked). Shell jobs will run with host network access. " +
+        "The push token remains the authoritative control. " +
+        "To suppress this warning, set network_isolation = false in mesh.toml [runner].",
       );
     }
   }

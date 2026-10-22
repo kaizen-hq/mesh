@@ -259,14 +259,14 @@ async function runShellJob(
   worktree: string,
   secrets: Record<string, string>,
   envPassthrough: string[],
+  networkIsolation: boolean,
   onLog: (line: string) => Promise<void>,
 ): Promise<number> {
   const env = buildShellEnv(envPassthrough, secrets);
-  // On Linux, run shell commands in an isolated network namespace unless the
-  // job explicitly opts in with network: true. This prevents a malicious
-  // command (e.g. a postinstall script) from reaching the mesh daemon on
-  // localhost even though it runs as the host process.
-  const netIsolate = process.platform === "linux" && !job.network;
+  // Isolate network only when the runner config allows it (Linux only, and
+  // unshare must be available — the startup probe sets network_isolation=false
+  // on hosts where it isn't), and the job hasn't opted out with network: true.
+  const netIsolate = networkIsolation && process.platform === "linux" && !job.network;
   let lastExit = 0;
   for (const cmd of job.commands) {
     const argv = buildShellCmdArgs(cmd, netIsolate);
@@ -431,7 +431,7 @@ export async function runPipeline(
       let exitCode: number;
       try {
         if (jobDef.mode === "shell") {
-          exitCode = await runShellJob(jobDef, worktree, jobSecrets, runnerConfig.env_passthrough, onLog);
+          exitCode = await runShellJob(jobDef, worktree, jobSecrets, runnerConfig.env_passthrough, runnerConfig.network_isolation, onLog);
         } else {
           exitCode = await runDockerJob(jobDef, jobName, worktree, jobSecrets, onLog);
         }

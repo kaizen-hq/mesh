@@ -57,6 +57,8 @@ export function parsePipeline(src: string): Pipeline {
       commands,
       depends_on,
       secrets,
+      push: raw.push === true,
+      network: raw.network === true,
     };
   }
 

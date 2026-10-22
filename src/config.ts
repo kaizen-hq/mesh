@@ -46,6 +46,7 @@ export const DEFAULT_RUNNER: RunnerConfig = {
   max_worktree_age_minutes: 60,
   max_worktree_disk_mb: 2048,
   log_retention_runs: 50,
+  network_isolation: true,
 };
 
 const KNOWN_TOP_LEVEL = new Set(["self", "peers", "transport", "runner"]);
@@ -54,7 +55,7 @@ const KNOWN_TRANSPORT = new Set(["tls", "poll_secs"]);
 const KNOWN_RUNNER = new Set([
   "enabled", "execution_modes", "labels", "max_concurrent_jobs",
   "workdir", "tools", "env_passthrough", "log_stream_interval_ms", "max_worktree_age_minutes",
-  "max_worktree_disk_mb", "log_retention_runs",
+  "max_worktree_disk_mb", "log_retention_runs", "network_isolation",
 ]);
 const KNOWN_PEER = new Set(["name", "pubkey", "addresses", "address"]);
 
@@ -135,6 +136,8 @@ export async function loadConfig(file: string): Promise<Config> {
       typeof rr.max_worktree_disk_mb === "number" ? rr.max_worktree_disk_mb : DEFAULT_RUNNER.max_worktree_disk_mb,
     log_retention_runs:
       typeof rr.log_retention_runs === "number" ? rr.log_retention_runs : DEFAULT_RUNNER.log_retention_runs,
+    network_isolation:
+      typeof rr.network_isolation === "boolean" ? rr.network_isolation : DEFAULT_RUNNER.network_isolation,
   };
 
   return {
