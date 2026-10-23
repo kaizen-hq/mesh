@@ -190,7 +190,9 @@ export async function onManualRun(
   // Always persist the run on the originating node so CiStarted/CiCompleted
   // updates from the runner are applied even when the run was assigned remotely.
   state.ci.setRun(run);
-  void saveRun(state.root, run).catch(() => {});
+  void saveRun(state.root, run).catch((e) => {
+    console.warn(`[ci] manual run ${run.run_id}: failed to persist initial run record: ${(e as Error).message}`);
+  });
 
   await assignWithFallback(state, rankedPeers, run, pipeline, trigger);
 }
@@ -247,7 +249,9 @@ export async function onRefUpdate(
   // Always persist the run on the originating node so CiStarted/CiCompleted
   // updates from the runner are applied even when the run was assigned remotely.
   state.ci.setRun(run);
-  void saveRun(state.root, run).catch(() => {});
+  void saveRun(state.root, run).catch((e) => {
+    console.warn(`[ci] push run ${run.run_id}: failed to persist initial run record: ${(e as Error).message}`);
+  });
 
   await assignWithFallback(state, rankedPeers, run, pipeline, trigger);
 }
@@ -282,7 +286,9 @@ async function assignWithFallback(
       // shows the correct runner before CiStarted arrives (or if it never does).
       run.runner = peer;
       state.ci.setRun(run);
-      void saveRun(state.root, run).catch(() => {});
+      void saveRun(state.root, run).catch((e) => {
+        console.warn(`[ci] run ${run.run_id}: failed to persist runner assignment: ${(e as Error).message}`);
+      });
       state.notifyCiRunChanged(run.repo, run.runner, run.status);
       // Store context so we can fall back to local if the peer declines.
       state.ci.setPendingAssignment(run.run_id, { pipeline, trigger });
@@ -298,7 +304,9 @@ async function assignWithFallback(
     console.log(`[ci] run ${run.run_id} cannot be executed: ${reason}`);
     const failed = { ...run, status: "failed" as const };
     state.ci.setRun(failed);
-    void saveRun(state.root, failed).catch(() => {});
+    void saveRun(state.root, failed).catch((e) => {
+      console.warn(`[ci] run ${failed.run_id}: failed to persist no-runner failure: ${(e as Error).message}`);
+    });
     state.notifyCiRunChanged(failed.repo, failed.runner, failed.status);
     return;
   }
@@ -458,7 +466,9 @@ async function runLocalPipeline(state: SchedulerCtx, pipeline: Pipeline, run: Pi
     duration_ms: duration,
     log_hash: logHash,
   };
-  void broadcastCiFrame(state, completedMsg).catch(() => {});
+  void broadcastCiFrame(state, completedMsg).catch((e) => {
+    console.warn(`[ci] run ${run.run_id}: CiCompleted broadcast failed: ${(e as Error).message}`);
+  });
 
   // Cleanup log buffer
   state.ci.deleteLogBuffer(run.run_id);
@@ -569,7 +579,9 @@ export async function handleAssignment(
 
   // Broadcast CiStarted to all peers
   const startedMsg: CiMessage = { type: "CiStarted", run_id: run.run_id, repo: run.repo, runner: me, started_at: run.started_at };
-  void broadcastCiFrame(state, startedMsg).catch(() => {});
+  void broadcastCiFrame(state, startedMsg).catch((e) => {
+    console.warn(`[ci] run ${run.run_id}: CiStarted broadcast failed: ${(e as Error).message}`);
+  });
 
   void runLocalPipeline(state, msg.pipeline, run);
 }

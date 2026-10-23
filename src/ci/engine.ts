@@ -329,18 +329,20 @@ function buildShellEnv(
   return { ...env, ...secrets };
 }
 
-async function runShellJob(
-  job: JobDefinition,
-  worktree: string,
-  jobHome: string | undefined,
-  secrets: Record<string, string>,
-  envPassthrough: string[],
-  networkIsolation: boolean,
-  jobsUid: number,
-  jobsGid: number,
-  onLog: (line: string) => Promise<void>,
-  meshVars: { sha: string; ref: string; runId: string },
-): Promise<number> {
+interface ShellJobOpts {
+  worktree: string;
+  jobHome?: string;
+  secrets: Record<string, string>;
+  envPassthrough: string[];
+  networkIsolation: boolean;
+  jobsUid: number;
+  jobsGid: number;
+  meshVars: { sha: string; ref: string; runId: string };
+  onLog: (line: string) => Promise<void>;
+}
+
+async function runShellJob(job: JobDefinition, opts: ShellJobOpts): Promise<number> {
+  const { worktree, jobHome, secrets, envPassthrough, networkIsolation, jobsUid, jobsGid, meshVars, onLog } = opts;
   const env = buildShellEnv(envPassthrough, secrets, jobsUid > 0);
   if (jobHome) env["HOME"] = jobHome;
   // Expose the commit SHA, ref, and run ID so jobs don't need to query git
@@ -375,14 +377,13 @@ async function runShellJob(
       // case — background procs from `cmd & ; do_work` stay in the same pgid).
       await killProcessGroup(pid, jobsUid, jobsGid);
 
-      // Phase 2: if no other job command is currently running as jobs_uid, do a
-      // full uid-wide sweep to catch any processes that escaped their pgid by
-      // calling setsid/setpgrp themselves. This is safe when the active set
-      // becomes empty because jobs_uid is dedicated to CI job execution only.
+      // Phase 2: /proc-based sweep for setsid-escaped orphans. Remove this
+      // command's pgid from the active set first, then scan /proc skipping any
+      // pgid that still belongs to a concurrently-running job command. This is
+      // race-free: the live activePgids set is checked per-process inside the
+      // scan, so a job that starts between phase 1 and phase 2 is spared.
       activeShellJobPgids.delete(pid);
-      if (activeShellJobPgids.size === 0) {
-        await killAllJobsUidOrphans(jobsUid, jobsGid);
-      }
+      await killJobsUidOrphans(jobsUid, jobsGid, activeShellJobPgids);
     }
 
     if (exitCode !== 0) return exitCode;
@@ -468,19 +469,59 @@ async function killProcessGroup(pgid: number, uid: number, gid: number): Promise
 }
 
 /**
- * Kills every process owned by jobs_uid that is NOT part of a currently-running
- * job command (i.e., not in activeShellJobPgids). This sweeps up any processes
- * that escaped their process group by calling setsid/setpgrp themselves.
+ * Scans /proc and kills every process owned by jobs_uid whose pgid is NOT in
+ * activePgids. This catches processes that escaped their job's process group by
+ * calling setsid/setpgrp themselves (e.g. `setsid sleep 600 &`).
  *
- * `kill -9 -1` as jobs_uid sends SIGKILL to all jobs_uid processes except the
- * caller (the sh process itself), which is permitted by Linux kill(2) semantics.
- * It is only safe to call when activeShellJobPgids is empty (no other concurrent
- * job command is running as jobs_uid), because it kills indiscriminately.
+ * Safe to call concurrently with other running jobs: only processes whose pgid
+ * is absent from activePgids (i.e. not belonging to any currently-running job
+ * command) are targeted.
  */
-async function killAllJobsUidOrphans(uid: number, gid: number): Promise<void> {
+async function killJobsUidOrphans(
+  jobsUid: number,
+  jobsGid: number,
+  activePgids: ReadonlySet<number>,
+): Promise<void> {
+  if (process.platform !== "linux") return;
+  let entries: string[];
+  try {
+    entries = await fs.readdir("/proc");
+  } catch {
+    return;
+  }
+
+  const toKill: number[] = [];
+  for (const entry of entries) {
+    const pid = parseInt(entry, 10);
+    if (!Number.isFinite(pid) || pid <= 0) continue;
+    try {
+      // Read the process group ID from /proc/<pid>/stat.
+      // Format: pid (comm) state ppid pgrp ...
+      // The comm field can contain spaces and parentheses, so we scan from the
+      // last ')' forward: after ')' + one space is state, then ppid, then pgrp.
+      const stat = await fs.readFile(`/proc/${pid}/stat`, "utf8");
+      const close = stat.lastIndexOf(")");
+      if (close === -1) continue;
+      const after = stat.slice(close + 2).trimStart().split(/\s+/);
+      // after[0]=state, after[1]=ppid, after[2]=pgrp
+      const pgid = parseInt(after[2] ?? "0", 10);
+      if (activePgids.has(pgid)) continue; // spare active job commands
+
+      // Read the effective uid from /proc/<pid>/status.
+      const status = await fs.readFile(`/proc/${pid}/status`, "utf8");
+      const uidLine = status.match(/^Uid:\s+\d+\s+(\d+)/m); // effective uid field
+      if (!uidLine || parseInt(uidLine[1]!, 10) !== jobsUid) continue;
+
+      toKill.push(pid);
+    } catch {
+      // Process exited between readdir and stat/status read — ignore.
+    }
+  }
+
+  if (toKill.length === 0) return;
   const proc = Bun.spawn<"ignore", "ignore", "ignore">(
-    ["sh", "-c", "kill -9 -1"],
-    { uid, gid, stdout: "ignore", stderr: "ignore" } as unknown as Parameters<
+    ["sh", "-c", `kill -9 ${toKill.join(" ")} 2>/dev/null; true`],
+    { uid: jobsUid, gid: jobsGid, stdout: "ignore", stderr: "ignore" } as unknown as Parameters<
       typeof Bun.spawn<"ignore", "ignore", "ignore">
     >[1],
   );
@@ -624,30 +665,44 @@ export async function runPipeline(
         log_seq: 0,
       };
       run.jobs[jobName] = jobRun;
-      await saveRun(root, run);
-      await opts.onRunUpdate?.(run);
+      await saveRun(root, run).catch((e) => {
+        console.warn(`[ci] run ${run.run_id}: saveRun failed: ${(e as Error).message}`);
+      });
+      await opts.onRunUpdate?.(run).catch((e) => {
+        console.warn(`[ci] run ${run.run_id}: onRunUpdate failed: ${(e as Error).message}`);
+      });
 
       // Skip if any dependency failed
       const skipped = collectSkipped(dag, failed);
       if (skipped.has(jobName)) {
         run.jobs[jobName]!.status = "skipped";
-        await saveRun(root, run);
+        await saveRun(root, run).catch((e) => {
+          console.warn(`[ci] run ${run.run_id}: saveRun failed: ${(e as Error).message}`);
+        });
         continue;
       }
 
       // Check if mode is allowed
       if (jobDef.mode === "shell" && !runnerConfig.execution_modes.includes("shell")) {
-        await appendLogChunk(root, run.repo, run.run_id, `[mesh-ci] job "${jobName}" requires shell mode but "shell" is not in execution_modes\n`);
+        await appendLogChunk(root, run.repo, run.run_id, `[mesh-ci] job "${jobName}" requires shell mode but "shell" is not in execution_modes\n`).catch(() => {});
         run.jobs[jobName]!.status = "failed";
         run.jobs[jobName]!.exit_code = 1;
         failed.add(jobName);
-        await saveRun(root, run);
+        await saveRun(root, run).catch((e) => {
+          console.warn(`[ci] run ${run.run_id}: saveRun failed: ${(e as Error).message}`);
+        });
         continue;
       }
 
+      // Best-effort: log I/O failures (disk full, fs error) must not abort a
+      // run. Log the failure to stderr so it surfaces in daemon output.
       const onLog = async (line: string) => {
-        await appendLogChunk(root, run.repo, run.run_id, line);
-        await opts.onLog?.(run.run_id, jobName, line);
+        await appendLogChunk(root, run.repo, run.run_id, line).catch((e) => {
+          console.warn(`[ci] run ${run.run_id}: failed to write log chunk: ${(e as Error).message}`);
+        });
+        await opts.onLog?.(run.run_id, jobName, line).catch((e) => {
+          console.warn(`[ci] run ${run.run_id}: onLog callback failed: ${(e as Error).message}`);
+        });
       };
 
       const jobSecrets = buildJobSecrets(secrets, jobDef, opts.pushToken);
@@ -655,13 +710,17 @@ export async function runPipeline(
       let exitCode: number;
       try {
         if (jobDef.mode === "shell") {
-          exitCode = await runShellJob(
-            jobDef, worktree, jobHome, jobSecrets,
-            runnerConfig.env_passthrough, runnerConfig.network_isolation,
-            runnerConfig.jobs_uid, runnerConfig.jobs_gid,
+          exitCode = await runShellJob(jobDef, {
+            worktree,
+            jobHome,
+            secrets: jobSecrets,
+            envPassthrough: runnerConfig.env_passthrough,
+            networkIsolation: runnerConfig.network_isolation,
+            jobsUid: runnerConfig.jobs_uid,
+            jobsGid: runnerConfig.jobs_gid,
+            meshVars: { sha: run.sha, ref: run.ref, runId: run.run_id },
             onLog,
-            { sha: run.sha, ref: run.ref, runId: run.run_id },
-          );
+          });
         } else {
           exitCode = await runDockerJob(jobDef, jobName, worktree, jobSecrets, onLog);
         }
@@ -674,8 +733,12 @@ export async function runPipeline(
       run.jobs[jobName]!.completed_at = new Date().toISOString();
       run.jobs[jobName]!.status = exitCode === 0 ? "passed" : "failed";
       if (exitCode !== 0) failed.add(jobName);
-      await saveRun(root, run);
-      await opts.onRunUpdate?.(run);
+      await saveRun(root, run).catch((e) => {
+        console.warn(`[ci] run ${run.run_id}: saveRun failed: ${(e as Error).message}`);
+      });
+      await opts.onRunUpdate?.(run).catch((e) => {
+        console.warn(`[ci] run ${run.run_id}: onRunUpdate failed: ${(e as Error).message}`);
+      });
     }
   } finally {
     await removeWorktree(
