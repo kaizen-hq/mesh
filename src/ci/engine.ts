@@ -119,8 +119,23 @@ function redactSecrets(line: string, secrets: Record<string, string>): string {
 // ---------- security helpers (exported for testing) ----------
 
 /**
+ * Returns true if a volume source string is an unsafe host path.
+ * Blocked prefixes: absolute (/), home-dir (~), env-var ($), traversal (..).
+ * Named volumes (bare alphanumeric names like "node_cache") are allowed.
+ */
+function isUnsafeVolumeSource(src: string): boolean {
+  const s = src.trimStart();
+  return s.startsWith("/") || s.startsWith("~") || s.startsWith("$") || s.startsWith("..");
+}
+
+/**
  * Throws if the compose file content contains unsafe options that would
  * allow a container to reach the mesh daemon or gain host privileges.
+ *
+ * Volumes are validated by parsing the YAML so all notations are covered:
+ *   - Block-style list:  volumes:\n  - /host:/container
+ *   - Flow-style list:   volumes: ["/host:/container"]
+ *   - Long syntax:       volumes:\n  - type: bind\n    source: /host
  */
 export function validateComposeFile(content: string, jobName: string): void {
   if (/network_mode\s*:\s*["']?host["']?/.test(content)) {
@@ -133,35 +148,49 @@ export function validateComposeFile(content: string, jobName: string): void {
       `job "${jobName}": privileged: true is not permitted in CI compose files`,
     );
   }
-  // Block host-path volume mounts. The source of a bind mount can be expressed
-  // several ways — we reject all of them:
-  //
-  //   Short syntax (- source:target):
-  //     - /abs/path:/container      absolute path
-  //     - ~/path:/container         tilde expansion
-  //     - ${HOME}/path:/container   env-var expansion
-  //     - $HOME/path:/container     unbraced env-var
-  //     - ../../path:/container     relative traversal out of worktree
-  //
-  //   Long syntax (type: bind / source: value):
-  //     source: /abs/path
-  //     source: ~/path
-  //     source: ${HOME}/path
-  //     source: $HOME/path
-  //     source: ../../path
-  //
-  // Named volumes (source is a bare name like "node_cache") and anonymous
-  // volumes ("- /workspace" with no colon) are still permitted.
-  //
-  // The short-syntax pattern requires a colon after the source so anonymous
-  // volumes (no colon) are not rejected.
-  const unsafeShortSource = /^\s+-\s+["']?(\/|~|\$|\.\.)[^:]*:/m;
-  const unsafeLongSource  = /^\s+source:\s+["']?(\/|~|\$|\.\.)/m;
 
-  if (unsafeShortSource.test(content) || unsafeLongSource.test(content)) {
-    throw new Error(
-      `job "${jobName}": host-path volume mounts are not permitted in CI compose files`,
-    );
+  // Parse the YAML so all volume notations (block, flow, long-syntax) are
+  // inspected structurally rather than via regex over raw text.
+  let doc: unknown;
+  try {
+    doc = Bun.YAML.parse(content);
+  } catch {
+    // Unparseable compose files are rejected at a higher level; skip the
+    // volume check here rather than masking the real parse error.
+    return;
+  }
+
+  if (doc == null || typeof doc !== "object") return;
+  const services = (doc as Record<string, unknown>)["services"];
+  if (services == null || typeof services !== "object") return;
+
+  for (const [, svc] of Object.entries(services as Record<string, unknown>)) {
+    if (svc == null || typeof svc !== "object") continue;
+    const volumes = (svc as Record<string, unknown>)["volumes"];
+    if (!Array.isArray(volumes)) continue;
+
+    for (const vol of volumes) {
+      if (typeof vol === "string") {
+        // Short syntax: "source:target[:options]" or "target" (anonymous).
+        // A string with no colon is an anonymous volume — always safe.
+        const colon = vol.indexOf(":");
+        if (colon === -1) continue;
+        const source = vol.slice(0, colon);
+        if (isUnsafeVolumeSource(source)) {
+          throw new Error(
+            `job "${jobName}": host-path volume mounts are not permitted in CI compose files`,
+          );
+        }
+      } else if (vol != null && typeof vol === "object") {
+        // Long syntax: { type: "bind", source: "...", target: "..." }
+        const source = (vol as Record<string, unknown>)["source"];
+        if (typeof source === "string" && isUnsafeVolumeSource(source)) {
+          throw new Error(
+            `job "${jobName}": host-path volume mounts are not permitted in CI compose files`,
+          );
+        }
+      }
+    }
   }
 }
 
@@ -310,9 +339,15 @@ async function runShellJob(
   jobsUid: number,
   jobsGid: number,
   onLog: (line: string) => Promise<void>,
+  meshVars: { sha: string; ref: string; runId: string },
 ): Promise<number> {
   const env = buildShellEnv(envPassthrough, secrets, jobsUid > 0);
   if (jobHome) env["HOME"] = jobHome;
+  // Expose the commit SHA, ref, and run ID so jobs don't need to query git
+  // (the worktree's .git points into ~/.mesh which the jobs user can't read).
+  env["MESH_SHA"] = meshVars.sha;
+  env["MESH_REF"] = meshVars.ref;
+  env["MESH_RUN_ID"] = meshVars.runId;
 
   // Isolate network only when the runner config allows it (Linux only, and
   // unshare must be available — the startup probe sets network_isolation=false
@@ -330,11 +365,26 @@ async function runShellJob(
       argv[0]!, argv.slice(1),
       { cwd: worktree, env, uid: jobsUid || undefined, gid: jobsGid || undefined },
       secrets, onLog,
+      // Register the pid synchronously after spawn so the active set reflects
+      // every running job command at all times, including during concurrent runs.
+      useSetsid ? (p) => activeShellJobPgids.add(p) : undefined,
     );
-    // Kill any processes the command left behind (e.g. `sleep & ; do_work`).
-    // A lingering uid=jobs_uid process could read /proc/<next-job-pid>/environ
-    // and steal MESH_PUSH_TOKEN from a later push: true job in the same run.
-    if (useSetsid) await killProcessGroup(pid, jobsUid, jobsGid);
+
+    if (useSetsid) {
+      // Phase 1: kill processes in the shell's own process group (the common
+      // case — background procs from `cmd & ; do_work` stay in the same pgid).
+      await killProcessGroup(pid, jobsUid, jobsGid);
+
+      // Phase 2: if no other job command is currently running as jobs_uid, do a
+      // full uid-wide sweep to catch any processes that escaped their pgid by
+      // calling setsid/setpgrp themselves. This is safe when the active set
+      // becomes empty because jobs_uid is dedicated to CI job execution only.
+      activeShellJobPgids.delete(pid);
+      if (activeShellJobPgids.size === 0) {
+        await killAllJobsUidOrphans(jobsUid, jobsGid);
+      }
+    }
+
     if (exitCode !== 0) return exitCode;
     lastExit = exitCode;
   }
@@ -343,12 +393,21 @@ async function runShellJob(
 
 // ---------- spawn helper ----------
 
+// PIDs of shell-job commands that are currently running (across all concurrent
+// pipeline runs). Each command is wrapped with setsid so pid == pgid. A pid is
+// added synchronously right after Bun.spawn returns (before any await), so the
+// set always reflects the live set of running job pgids.
+const activeShellJobPgids = new Set<number>();
+
 async function spawnAndLog(
   cmd: string,
   args: string[],
   opts: { cwd?: string; env?: Record<string, string>; uid?: number; gid?: number },
   secrets: Record<string, string>,
   onLog: (line: string) => Promise<void>,
+  // Called synchronously after spawn, before any await, so callers can register
+  // the pid in activeShellJobPgids while the process is still running.
+  onPid?: (pid: number) => void,
 ): Promise<{ exitCode: number; pid: number }> {
   // Explicit generics fix: uid/gid are missing from bun-types 1.3.14 so we
   // cast options through unknown. The explicit <"ignore","pipe","pipe"> tells
@@ -362,6 +421,10 @@ async function spawnAndLog(
     stdout: "pipe",
     stderr: "pipe",
   } as unknown as Parameters<typeof Bun.spawn<"ignore", "pipe", "pipe">>[1]);
+
+  // Register before any await so the pid is in the active set for the entire
+  // duration of the process, including when concurrent cleanup runs check it.
+  onPid?.(proc.pid);
 
   const dec = new TextDecoder();
 
@@ -387,16 +450,36 @@ async function spawnAndLog(
 }
 
 /**
- * Sends SIGKILL to every process in the given process group, running the
- * kill command as jobs_uid so it has permission to signal jobs_uid processes.
- * Errors are silently swallowed: the group may already be empty.
+ * Sends SIGKILL to every process in the given process group.
+ * `kill` is a shell built-in on minimal images (no /bin/kill binary), so we
+ * invoke it via sh. Errors are silently swallowed: the group may be empty.
  *
  * Pre-condition: the target process was spawned with `setsid` so that
  * proc.pid == pgid (the process became its own session and group leader).
  */
 async function killProcessGroup(pgid: number, uid: number, gid: number): Promise<void> {
   const proc = Bun.spawn<"ignore", "ignore", "ignore">(
-    ["kill", "-9", `-${pgid}`],
+    ["sh", "-c", `kill -9 -- -${pgid}`],
+    { uid, gid, stdout: "ignore", stderr: "ignore" } as unknown as Parameters<
+      typeof Bun.spawn<"ignore", "ignore", "ignore">
+    >[1],
+  );
+  await proc.exited.catch(() => {});
+}
+
+/**
+ * Kills every process owned by jobs_uid that is NOT part of a currently-running
+ * job command (i.e., not in activeShellJobPgids). This sweeps up any processes
+ * that escaped their process group by calling setsid/setpgrp themselves.
+ *
+ * `kill -9 -1` as jobs_uid sends SIGKILL to all jobs_uid processes except the
+ * caller (the sh process itself), which is permitted by Linux kill(2) semantics.
+ * It is only safe to call when activeShellJobPgids is empty (no other concurrent
+ * job command is running as jobs_uid), because it kills indiscriminately.
+ */
+async function killAllJobsUidOrphans(uid: number, gid: number): Promise<void> {
+  const proc = Bun.spawn<"ignore", "ignore", "ignore">(
+    ["sh", "-c", "kill -9 -1"],
     { uid, gid, stdout: "ignore", stderr: "ignore" } as unknown as Parameters<
       typeof Bun.spawn<"ignore", "ignore", "ignore">
     >[1],
@@ -577,6 +660,7 @@ export async function runPipeline(
             runnerConfig.env_passthrough, runnerConfig.network_isolation,
             runnerConfig.jobs_uid, runnerConfig.jobs_gid,
             onLog,
+            { sha: run.sha, ref: run.ref, runId: run.run_id },
           );
         } else {
           exitCode = await runDockerJob(jobDef, jobName, worktree, jobSecrets, onLog);

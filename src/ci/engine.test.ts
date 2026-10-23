@@ -391,6 +391,47 @@ services:
 `;
     expect(() => validateComposeFile(yaml, "build")).not.toThrow();
   });
+
+  // --- flow-style list ---
+
+  it("rejects flow-style absolute host-path volume", () => {
+    const yaml = `
+services:
+  app:
+    image: node:20
+    volumes: ["/home/mesh/.mesh:/steal"]
+`;
+    expect(() => validateComposeFile(yaml, "exfil")).toThrow(/host-path volume/);
+  });
+
+  it("rejects flow-style tilde host-path volume", () => {
+    const yaml = `
+services:
+  app:
+    volumes: ["~/.mesh:/steal"]
+`;
+    expect(() => validateComposeFile(yaml, "exfil")).toThrow(/host-path volume/);
+  });
+
+  it("accepts flow-style named volume", () => {
+    const yaml = `
+services:
+  app:
+    image: node:20
+    volumes: ["node_cache:/root/.npm"]
+`;
+    expect(() => validateComposeFile(yaml, "build")).not.toThrow();
+  });
+
+  it("accepts flow-style anonymous volume", () => {
+    const yaml = `
+services:
+  app:
+    image: node:20
+    volumes: ["/workspace"]
+`;
+    expect(() => validateComposeFile(yaml, "build")).not.toThrow();
+  });
 });
 
 // ---------- buildShellCmdArgs ----------
