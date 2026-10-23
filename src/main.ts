@@ -57,7 +57,8 @@ const USAGE_TAIL = `  start [flags]                     Run the foreground serve
   config set <section.key> <value>  set a mesh.toml value (no daemon needed)
   config get <section.key>          print a mesh.toml value
   update [--from PEER] [--ref TAG] [--force]  update to the latest release
-  push-token                        print the direct-push token for git remotes
+  push-token                        generate/rotate the direct-push token for git remotes
+                                    (in Kubernetes, set MESH_DIRECT_PUSH_TOKEN_HASH env var instead)
   ci status [<repo>]                show recent pipeline runs
   ci run <repo> <ref>               manually trigger a pipeline
   ci logs <repo> <run_id>           print build log
@@ -275,14 +276,22 @@ async function cmdPushToken(root: string) {
   console.log("Configure a git remote to use this token:");
   console.log(`  git config http.extraHeader "X-Mesh-Run-Token: ${token}"`);
   console.log("");
+  console.log("The hash is stored read-only at:", path.join(root, "push-token-hash"));
   console.log("This token is only accepted from localhost. Keep it out of version control.");
   console.log("Running this command again rotates the token and invalidates the old one.");
+  console.log("");
+  console.log("In Kubernetes: store this hash in a Secret and set MESH_DIRECT_PUSH_TOKEN_HASH.");
 }
 
 // ----------
 
 async function ensureDirs(root: string) {
   await fs.mkdir(root, { recursive: true });
+  // Lock down the root directory: shell jobs running as a different uid must
+  // not be able to enter ~/.mesh to read keys/, mesh.toml, or push-token-hash.
+  // chmod 700 is defence-in-depth alongside jobs_uid — it catches the case
+  // where jobs_uid is not configured or the capability grant is missing.
+  await fs.chmod(root, 0o700);
   await fs.mkdir(path.join(root, "keys"), { recursive: true });
   await fs.mkdir(path.join(root, "tls"), { recursive: true });
   await fs.mkdir(path.join(root, "repos"), { recursive: true });

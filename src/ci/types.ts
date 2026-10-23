@@ -133,6 +133,12 @@ export interface RunnerConfig {
   // (e.g. hardened kernels, non-root runners without CAP_SYS_ADMIN).
   // The startup probe auto-disables this if unshare is unavailable.
   network_isolation: boolean;
+  // uid/gid to run shell jobs as. 0 = disabled (jobs run as the daemon user).
+  // Requires CAP_SETUID/CAP_SETGID on the daemon process.
+  // Set to a dedicated low-privilege user (e.g. mesh-jobs, uid=65533) so that
+  // shell jobs cannot read or write ~/.mesh even on the same host.
+  jobs_uid: number;
+  jobs_gid: number;
 }
 
 export function emptyCiState(): CiState {

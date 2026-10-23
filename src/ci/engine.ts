@@ -6,6 +6,7 @@ import * as os from "node:os";
 import type { Pipeline, JobDefinition, PipelineRun, JobRun, RunnerConfig } from "./types.ts";
 import { appendLogChunk, saveRun } from "./store.ts";
 
+
 // ---------- DAG types ----------
 
 export interface JobDAG {
@@ -132,6 +133,18 @@ export function validateComposeFile(content: string, jobName: string): void {
       `job "${jobName}": privileged: true is not permitted in CI compose files`,
     );
   }
+  // Block host-path volume mounts. A compose file with
+  //   volumes:
+  //     - /home/mesh/.mesh:/steal
+  // would give the container direct access to the daemon's private files
+  // regardless of the uid boundary. Only named volumes (no leading slash on
+  // the source side) and anonymous volumes are allowed.
+  // Pattern: a hyphen-prefixed volumes list entry whose source is an abs path.
+  if (/^\s+-\s+["']?\/[^:]+:/m.test(content)) {
+    throw new Error(
+      `job "${jobName}": host-path volume mounts (e.g. /host/path:/container) are not permitted in CI compose files`,
+    );
+  }
 }
 
 /**
@@ -238,10 +251,16 @@ function buildDockerEnv(secrets: Record<string, string>): Record<string, string>
 function buildShellEnv(
   passthrough: string[],
   secrets: Record<string, string>,
+  isolatedUser = false,
 ): Record<string, string> {
   const env: Record<string, string> = {};
   // Always include enough to locate binaries and write temp files.
-  for (const key of ["PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL"]) {
+  // Omit HOME when running as a different user: the daemon's home directory
+  // is not writable by the jobs uid, so passing it causes tool cache writes
+  // (npm, cargo, go) to fail. The job's HOME will be set by the caller.
+  for (const key of isolatedUser
+    ? ["PATH", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL"]
+    : ["PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL"]) {
     const val = process.env[key];
     if (val !== undefined) env[key] = val;
   }
@@ -257,12 +276,17 @@ function buildShellEnv(
 async function runShellJob(
   job: JobDefinition,
   worktree: string,
+  jobHome: string | undefined,
   secrets: Record<string, string>,
   envPassthrough: string[],
   networkIsolation: boolean,
+  jobsUid: number,
+  jobsGid: number,
   onLog: (line: string) => Promise<void>,
 ): Promise<number> {
-  const env = buildShellEnv(envPassthrough, secrets);
+  const env = buildShellEnv(envPassthrough, secrets, jobsUid > 0);
+  if (jobHome) env["HOME"] = jobHome;
+
   // Isolate network only when the runner config allows it (Linux only, and
   // unshare must be available — the startup probe sets network_isolation=false
   // on hosts where it isn't), and the job hasn't opted out with network: true.
@@ -270,7 +294,11 @@ async function runShellJob(
   let lastExit = 0;
   for (const cmd of job.commands) {
     const argv = buildShellCmdArgs(cmd, netIsolate);
-    const exit = await spawnAndLog(argv[0]!, argv.slice(1), { cwd: worktree, env }, secrets, onLog);
+    const exit = await spawnAndLog(
+      argv[0]!, argv.slice(1),
+      { cwd: worktree, env, uid: jobsUid || undefined, gid: jobsGid || undefined },
+      secrets, onLog,
+    );
     if (exit !== 0) return exit;
     lastExit = exit;
   }
@@ -282,16 +310,22 @@ async function runShellJob(
 async function spawnAndLog(
   cmd: string,
   args: string[],
-  opts: { cwd?: string; env?: Record<string, string> },
+  opts: { cwd?: string; env?: Record<string, string>; uid?: number; gid?: number },
   secrets: Record<string, string>,
   onLog: (line: string) => Promise<void>,
 ): Promise<number> {
-  const proc = Bun.spawn([cmd, ...args], {
+  // Explicit generics fix: uid/gid are missing from bun-types 1.3.14 so we
+  // cast options through unknown. The explicit <"ignore","pipe","pipe"> tells
+  // TypeScript the return shape (proc.stdout/stderr are ReadableStream), which
+  // the cast would otherwise erase.
+  const proc = Bun.spawn<"ignore", "pipe", "pipe">([cmd, ...args], {
     cwd: opts.cwd,
     env: opts.env,
+    uid: opts.uid,
+    gid: opts.gid,
     stdout: "pipe",
     stderr: "pipe",
-  });
+  } as unknown as Parameters<typeof Bun.spawn<"ignore", "pipe", "pipe">>[1]);
 
   const dec = new TextDecoder();
 
@@ -323,9 +357,30 @@ export async function setupWorktree(
   runId: string,
   sha: string,
   workdir: string,
+  jobsUid?: number,
+  jobsGid?: number,
 ): Promise<string> {
   await fs.mkdir(workdir, { recursive: true });
+  // 755: daemon owns it, jobs uid can traverse into run subdirs.
+  await fs.chmod(workdir, 0o755);
   const dest = path.join(workdir, runId);
+
+  // When running jobs as a different user, pre-create the worktree directory
+  // owned by that user. Git accepts a pre-existing empty directory and will
+  // populate it with source files (owned by the daemon uid, read-only to the
+  // job — intentional). The job owns the directory itself, so it can freely
+  // create node_modules/, dist/, target/, etc. without CAP_CHOWN.
+  if (jobsUid && jobsGid) {
+    const mkdirProc = Bun.spawn<"ignore", "pipe", "pipe">(["mkdir", dest], {
+      uid: jobsUid, gid: jobsGid, stdout: "pipe", stderr: "pipe",
+    } as unknown as Parameters<typeof Bun.spawn<"ignore", "pipe", "pipe">>[1]);
+    await mkdirProc.exited;
+    if (mkdirProc.exitCode !== 0) {
+      const stderr = await new Response(mkdirProc.stderr).text();
+      throw new Error(`mkdir ${dest} as uid=${jobsUid} failed (exit ${mkdirProc.exitCode}): ${stderr.trim()}`);
+    }
+  }
+
   const proc = Bun.spawn(["git", "worktree", "add", dest, sha], {
     cwd: repoPath,
     stdout: "pipe",
@@ -339,7 +394,21 @@ export async function setupWorktree(
   return dest;
 }
 
-export async function removeWorktree(repoPath: string, worktreePath: string): Promise<void> {
+export async function removeWorktree(
+  repoPath: string,
+  worktreePath: string,
+  jobsUid?: number,
+  jobsGid?: number,
+): Promise<void> {
+  // When jobs ran as a different uid they own files inside the worktree that
+  // uid=1001 cannot delete. Run rm -rf as the jobs uid first so all
+  // jobs-owned files are removed, then let git deregister the worktree.
+  if (jobsUid && jobsGid) {
+    const rmProc = Bun.spawn<"ignore", "pipe", "pipe">(["rm", "-rf", worktreePath], {
+      uid: jobsUid, gid: jobsGid, stdout: "pipe", stderr: "pipe",
+    } as unknown as Parameters<typeof Bun.spawn<"ignore", "pipe", "pipe">>[1]);
+    await rmProc.exited;
+  }
   const proc = Bun.spawn(["git", "worktree", "remove", worktreePath, "--force"], {
     cwd: repoPath,
     stdout: "pipe",
@@ -375,7 +444,10 @@ export async function runPipeline(
   // Setup worktree
   let worktree: string;
   try {
-    worktree = await setupWorktree(repoPath, run.run_id, run.sha, runnerConfig.workdir);
+    worktree = await setupWorktree(
+      repoPath, run.run_id, run.sha, runnerConfig.workdir,
+      runnerConfig.jobs_uid || undefined, runnerConfig.jobs_gid || undefined,
+    );
   } catch (e) {
     run.status = "failed";
     run.completed_at = new Date().toISOString();
@@ -387,6 +459,17 @@ export async function runPipeline(
   run.status = "running";
   await saveRun(root, run);
   await opts.onRunUpdate?.(run);
+
+  // Create a per-run home directory for the jobs user once, shared across all
+  // shell jobs in this run. Cleaned up in the finally block alongside worktree.
+  let jobHome: string | undefined;
+  if (runnerConfig.jobs_uid > 0) {
+    jobHome = path.join(os.tmpdir(), `mesh-jobs-home-${run.run_id}`);
+    const mkHomeProc = Bun.spawn<"ignore", "pipe", "pipe">(["mkdir", "-p", jobHome], {
+      uid: runnerConfig.jobs_uid, gid: runnerConfig.jobs_gid, stdout: "pipe", stderr: "pipe",
+    } as unknown as Parameters<typeof Bun.spawn<"ignore", "pipe", "pipe">>[1]);
+    await mkHomeProc.exited;
+  }
 
   const failed = new Set<string>();
 
@@ -431,7 +514,12 @@ export async function runPipeline(
       let exitCode: number;
       try {
         if (jobDef.mode === "shell") {
-          exitCode = await runShellJob(jobDef, worktree, jobSecrets, runnerConfig.env_passthrough, runnerConfig.network_isolation, onLog);
+          exitCode = await runShellJob(
+            jobDef, worktree, jobHome, jobSecrets,
+            runnerConfig.env_passthrough, runnerConfig.network_isolation,
+            runnerConfig.jobs_uid, runnerConfig.jobs_gid,
+            onLog,
+          );
         } else {
           exitCode = await runDockerJob(jobDef, jobName, worktree, jobSecrets, onLog);
         }
@@ -448,7 +536,16 @@ export async function runPipeline(
       await opts.onRunUpdate?.(run);
     }
   } finally {
-    await removeWorktree(repoPath, worktree).catch(() => {});
+    await removeWorktree(
+      repoPath, worktree,
+      runnerConfig.jobs_uid || undefined, runnerConfig.jobs_gid || undefined,
+    ).catch(() => {});
+    if (jobHome && runnerConfig.jobs_uid) {
+      const rmHome = Bun.spawn<"ignore", "pipe", "pipe">(["rm", "-rf", jobHome], {
+        uid: runnerConfig.jobs_uid, gid: runnerConfig.jobs_gid, stdout: "pipe", stderr: "pipe",
+      } as unknown as Parameters<typeof Bun.spawn<"ignore", "pipe", "pipe">>[1]);
+      await rmHome.exited.catch(() => {});
+    }
   }
 
   run.status = failed.size > 0 ? "failed" : "passed";

@@ -39,7 +39,7 @@ export const DEFAULT_RUNNER: RunnerConfig = {
   execution_modes: ["docker"],
   labels: [],
   max_concurrent_jobs: 2,
-  workdir: path.join(os.homedir(), ".mesh", "ci", "runs"),
+  workdir: path.join(os.tmpdir(), "mesh-ci-runs"),
   tools: [],
   env_passthrough: [],
   log_stream_interval_ms: 500,
@@ -47,6 +47,8 @@ export const DEFAULT_RUNNER: RunnerConfig = {
   max_worktree_disk_mb: 2048,
   log_retention_runs: 50,
   network_isolation: true,
+  jobs_uid: 0,
+  jobs_gid: 0,
 };
 
 const KNOWN_TOP_LEVEL = new Set(["self", "peers", "transport", "runner"]);
@@ -55,7 +57,7 @@ const KNOWN_TRANSPORT = new Set(["tls", "poll_secs"]);
 const KNOWN_RUNNER = new Set([
   "enabled", "execution_modes", "labels", "max_concurrent_jobs",
   "workdir", "tools", "env_passthrough", "log_stream_interval_ms", "max_worktree_age_minutes",
-  "max_worktree_disk_mb", "log_retention_runs", "network_isolation",
+  "max_worktree_disk_mb", "log_retention_runs", "network_isolation", "jobs_uid", "jobs_gid",
 ]);
 const KNOWN_PEER = new Set(["name", "pubkey", "addresses", "address"]);
 
@@ -138,6 +140,8 @@ export async function loadConfig(file: string): Promise<Config> {
       typeof rr.log_retention_runs === "number" ? rr.log_retention_runs : DEFAULT_RUNNER.log_retention_runs,
     network_isolation:
       typeof rr.network_isolation === "boolean" ? rr.network_isolation : DEFAULT_RUNNER.network_isolation,
+    jobs_uid: typeof rr.jobs_uid === "number" ? rr.jobs_uid : DEFAULT_RUNNER.jobs_uid,
+    jobs_gid: typeof rr.jobs_gid === "number" ? rr.jobs_gid : DEFAULT_RUNNER.jobs_gid,
   };
 
   return {

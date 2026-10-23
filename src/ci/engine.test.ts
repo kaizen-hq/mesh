@@ -244,6 +244,49 @@ services:
 `;
     expect(() => validateComposeFile(yaml, "bad-job")).toThrow();
   });
+
+  it("rejects absolute host-path volume mounts", () => {
+    const yaml = `
+services:
+  app:
+    image: node:20
+    volumes:
+      - /home/mesh/.mesh:/steal
+`;
+    expect(() => validateComposeFile(yaml, "exfil")).toThrow(/host-path volume/);
+  });
+
+  it("rejects host-path mount targeting a different path", () => {
+    const yaml = `
+services:
+  app:
+    volumes:
+      - /etc/passwd:/etc/passwd:ro
+`;
+    expect(() => validateComposeFile(yaml, "exfil")).toThrow(/host-path volume/);
+  });
+
+  it("accepts named volume mounts (no leading slash on source)", () => {
+    const yaml = `
+services:
+  app:
+    image: node:20
+    volumes:
+      - node_cache:/root/.npm
+`;
+    expect(() => validateComposeFile(yaml, "build")).not.toThrow();
+  });
+
+  it("accepts anonymous volume mounts", () => {
+    const yaml = `
+services:
+  app:
+    image: node:20
+    volumes:
+      - /workspace
+`;
+    expect(() => validateComposeFile(yaml, "build")).not.toThrow();
+  });
 });
 
 // ---------- buildShellCmdArgs ----------

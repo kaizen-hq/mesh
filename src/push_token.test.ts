@@ -19,6 +19,9 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  // Hash file is 0o400 — chmod before rm so cleanup always works.
+  const file = path.join(tmpDir, PUSH_TOKEN_HASH_FILE);
+  await fs.chmod(file, 0o600).catch(() => {});
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
@@ -53,33 +56,40 @@ describe("generateDirectPushToken", () => {
     expect(await hashToken(token)).toBe(hash);
   });
 
-  it("writes the hash (not the token) to disk", async () => {
+  it("writes the hash (not the plaintext token) to disk", async () => {
     const { token, hash } = await generateDirectPushToken(tmpDir);
     const onDisk = (await fs.readFile(path.join(tmpDir, PUSH_TOKEN_HASH_FILE), "utf8")).trim();
     expect(onDisk).toBe(hash);
     expect(onDisk).not.toContain(token);
   });
 
-  it("writes the hash file with mode 0o600", async () => {
+  it("writes the hash file with mode 0o400 (read-only)", async () => {
     await generateDirectPushToken(tmpDir);
     const stat = await fs.stat(path.join(tmpDir, PUSH_TOKEN_HASH_FILE));
-    expect(stat.mode & 0o777).toBe(0o600);
+    expect(stat.mode & 0o777).toBe(0o400);
   });
 
-  it("calling again rotates — returns a new token each time", async () => {
+  it("calling again rotates — produces a new token and hash each time", async () => {
     const first = await generateDirectPushToken(tmpDir);
     const second = await generateDirectPushToken(tmpDir);
     expect(first.token).not.toBe(second.token);
     expect(first.hash).not.toBe(second.hash);
   });
 
+  it("rotation succeeds even though the old file is 0o400", async () => {
+    await generateDirectPushToken(tmpDir);
+    await expect(generateDirectPushToken(tmpDir)).resolves.toBeTruthy();
+  });
+
   it("two different roots get independent tokens", async () => {
     const otherDir = await fs.mkdtemp(path.join(os.tmpdir(), "mesh-push-token-other-"));
+    const otherFile = path.join(otherDir, PUSH_TOKEN_HASH_FILE);
     try {
       const a = await generateDirectPushToken(tmpDir);
       const b = await generateDirectPushToken(otherDir);
       expect(a.token).not.toBe(b.token);
     } finally {
+      await fs.chmod(otherFile, 0o600).catch(() => {});
       await fs.rm(otherDir, { recursive: true, force: true });
     }
   });
@@ -96,14 +106,58 @@ describe("loadDirectPushTokenHash", () => {
   });
 
   it("returns null for an empty hash file", async () => {
-    await fs.writeFile(path.join(tmpDir, PUSH_TOKEN_HASH_FILE), "");
+    const file = path.join(tmpDir, PUSH_TOKEN_HASH_FILE);
+    await fs.writeFile(file, "", { mode: 0o400 });
     expect(await loadDirectPushTokenHash(tmpDir)).toBeNull();
   });
 
   it("trims whitespace from the stored hash", async () => {
     const { hash } = await generateDirectPushToken(tmpDir);
-    // Overwrite with extra whitespace
-    await fs.writeFile(path.join(tmpDir, PUSH_TOKEN_HASH_FILE), `  ${hash}  \n`);
+    const file = path.join(tmpDir, PUSH_TOKEN_HASH_FILE);
+    await fs.chmod(file, 0o600);
+    await fs.writeFile(file, `  ${hash}  \n`, { mode: 0o600 });
+    await fs.chmod(file, 0o400);
     expect(await loadDirectPushTokenHash(tmpDir)).toBe(hash);
+  });
+
+  it("throws when the hash file is writable (same-uid shell job attack vector)", async () => {
+    const { hash } = await generateDirectPushToken(tmpDir);
+    const file = path.join(tmpDir, PUSH_TOKEN_HASH_FILE);
+    // Simulate a shell job having written/chmoded the file back to writable.
+    await fs.chmod(file, 0o600);
+    await expect(loadDirectPushTokenHash(tmpDir)).rejects.toThrow("writable by this process");
+  });
+
+  it("reads from MESH_DIRECT_PUSH_TOKEN_HASH env var (K8s Secret injection)", async () => {
+    const fakeHash = "a".repeat(64);
+    const original = process.env["MESH_DIRECT_PUSH_TOKEN_HASH"];
+    process.env["MESH_DIRECT_PUSH_TOKEN_HASH"] = fakeHash;
+    try {
+      // No file needed — env var takes precedence.
+      expect(await loadDirectPushTokenHash(tmpDir)).toBe(fakeHash);
+    } finally {
+      if (original === undefined) {
+        delete process.env["MESH_DIRECT_PUSH_TOKEN_HASH"];
+      } else {
+        process.env["MESH_DIRECT_PUSH_TOKEN_HASH"] = original;
+      }
+    }
+  });
+
+  it("env var takes precedence over a hash file on disk", async () => {
+    const { hash: diskHash } = await generateDirectPushToken(tmpDir);
+    const envHash = "b".repeat(64);
+    const original = process.env["MESH_DIRECT_PUSH_TOKEN_HASH"];
+    process.env["MESH_DIRECT_PUSH_TOKEN_HASH"] = envHash;
+    try {
+      expect(await loadDirectPushTokenHash(tmpDir)).toBe(envHash);
+      expect(await loadDirectPushTokenHash(tmpDir)).not.toBe(diskHash);
+    } finally {
+      if (original === undefined) {
+        delete process.env["MESH_DIRECT_PUSH_TOKEN_HASH"];
+      } else {
+        process.env["MESH_DIRECT_PUSH_TOKEN_HASH"] = original;
+      }
+    }
   });
 });
