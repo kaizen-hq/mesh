@@ -361,8 +361,10 @@ export async function setupWorktree(
   jobsGid?: number,
 ): Promise<string> {
   await fs.mkdir(workdir, { recursive: true });
-  // 755: daemon owns it, jobs uid can traverse into run subdirs.
-  await fs.chmod(workdir, 0o755);
+  // 1777: sticky + world-writable, like /tmp itself. The sticky bit prevents
+  // uid=65533 (mesh-jobs) from deleting uid=1001 run dirs and vice versa.
+  // World-write is required so jobs uid can mkdir its own run subdir here.
+  await fs.chmod(workdir, 0o1777);
   const dest = path.join(workdir, runId);
 
   // When running jobs as a different user, pre-create the worktree directory
@@ -371,7 +373,9 @@ export async function setupWorktree(
   // job — intentional). The job owns the directory itself, so it can freely
   // create node_modules/, dist/, target/, etc. without CAP_CHOWN.
   if (jobsUid && jobsGid) {
-    const mkdirProc = Bun.spawn<"ignore", "pipe", "pipe">(["mkdir", dest], {
+    // -m 777: world-writable so uid=1001 (git worktree add) can create .git,
+    // and uid=65533 (job) can create node_modules/ etc. inside the same dir.
+    const mkdirProc = Bun.spawn<"ignore", "pipe", "pipe">(["mkdir", "-m", "777", dest], {
       uid: jobsUid, gid: jobsGid, stdout: "pipe", stderr: "pipe",
     } as unknown as Parameters<typeof Bun.spawn<"ignore", "pipe", "pipe">>[1]);
     await mkdirProc.exited;

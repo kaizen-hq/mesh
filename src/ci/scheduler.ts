@@ -400,6 +400,10 @@ export function scheduleLocalRun(state: SchedulerCtx, pipeline: Pipeline, run: P
 
 async function runLocalPipeline(state: SchedulerCtx, pipeline: Pipeline, run: PipelineRun): Promise<void> {
   console.log(`[ci] starting local run ${run.run_id} for ${run.repo} @ ${run.ref}`);
+  // Persist the run as "pending" before doing any work. If the process crashes
+  // before runPipeline writes its own status, abandonStaleRuns on the next
+  // startup will find this entry in the index and mark it failed.
+  await saveRun(state.root, run);
   const { runPipeline } = await import("./engine.ts");
   const mirrorPath = repoStore.mirrorPath(state.root, run.repo);
 

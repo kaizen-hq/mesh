@@ -28,7 +28,10 @@ export async function saveRun(root: string, run: PipelineRun): Promise<void> {
   const dir = ciRunDir(root, run.repo, run.run_id);
   await fs.mkdir(dir, { recursive: true });
   const p = runJsonPath(root, run.repo, run.run_id);
-  const tmp = p + ".tmp";
+  // Use a unique suffix so concurrent saveRun calls (e.g. the fire-and-forget
+  // at the trigger site and the awaited one in runLocalPipeline) each write to
+  // their own .tmp file and don't race on a shared "run.json.tmp" name.
+  const tmp = p + "." + Math.random().toString(36).slice(2) + ".tmp";
   await fs.writeFile(tmp, JSON.stringify(run, null, 2), "utf8");
   await fs.rename(tmp, p);
   await updateRunsIndex(root, run);
@@ -156,9 +159,25 @@ export async function abandonStaleRuns(root: string): Promise<void> {
   }
 
   for (const repo of repos) {
+    // Collect run IDs from two sources and union them:
+    //   1. The runs.json index (normal case)
+    //   2. Filesystem scan (catches runs whose process crashed before updateRunsIndex completed)
     const idx = await loadRunsIndex(root, repo);
-    for (const entry of idx.runs) {
-      const run = await loadRun(root, repo, entry.run_id);
+    const indexedIds = new Set(idx.runs.map((e) => e.run_id));
+
+    const repoDir = path.join(root, "ci", repo);
+    let dirEntries: string[] = [];
+    try {
+      const entries = await fs.readdir(repoDir, { withFileTypes: true });
+      dirEntries = entries
+        .filter((e) => e.isDirectory())
+        .map((e) => e.name);
+    } catch {}
+
+    const allIds = new Set([...indexedIds, ...dirEntries]);
+
+    for (const runId of allIds) {
+      const run = await loadRun(root, repo, runId);
       if (!run) continue;
       if (run.status === "pending" || run.status === "running") {
         run.status = "failed";
