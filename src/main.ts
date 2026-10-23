@@ -287,11 +287,6 @@ async function cmdPushToken(root: string) {
 
 async function ensureDirs(root: string) {
   await fs.mkdir(root, { recursive: true });
-  // Lock down the root directory: shell jobs running as a different uid must
-  // not be able to enter ~/.mesh to read keys/, mesh.toml, or push-token-hash.
-  // chmod 700 is defence-in-depth alongside jobs_uid — it catches the case
-  // where jobs_uid is not configured or the capability grant is missing.
-  await fs.chmod(root, 0o700);
   await fs.mkdir(path.join(root, "keys"), { recursive: true });
   await fs.mkdir(path.join(root, "tls"), { recursive: true });
   await fs.mkdir(path.join(root, "repos"), { recursive: true });
