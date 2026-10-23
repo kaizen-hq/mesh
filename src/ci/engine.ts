@@ -133,28 +133,55 @@ export function validateComposeFile(content: string, jobName: string): void {
       `job "${jobName}": privileged: true is not permitted in CI compose files`,
     );
   }
-  // Block host-path volume mounts. A compose file with
-  //   volumes:
-  //     - /home/mesh/.mesh:/steal
-  // would give the container direct access to the daemon's private files
-  // regardless of the uid boundary. Only named volumes (no leading slash on
-  // the source side) and anonymous volumes are allowed.
-  // Pattern: a hyphen-prefixed volumes list entry whose source is an abs path.
-  if (/^\s+-\s+["']?\/[^:]+:/m.test(content)) {
+  // Block host-path volume mounts. The source of a bind mount can be expressed
+  // several ways — we reject all of them:
+  //
+  //   Short syntax (- source:target):
+  //     - /abs/path:/container      absolute path
+  //     - ~/path:/container         tilde expansion
+  //     - ${HOME}/path:/container   env-var expansion
+  //     - $HOME/path:/container     unbraced env-var
+  //     - ../../path:/container     relative traversal out of worktree
+  //
+  //   Long syntax (type: bind / source: value):
+  //     source: /abs/path
+  //     source: ~/path
+  //     source: ${HOME}/path
+  //     source: $HOME/path
+  //     source: ../../path
+  //
+  // Named volumes (source is a bare name like "node_cache") and anonymous
+  // volumes ("- /workspace" with no colon) are still permitted.
+  //
+  // The short-syntax pattern requires a colon after the source so anonymous
+  // volumes (no colon) are not rejected.
+  const unsafeShortSource = /^\s+-\s+["']?(\/|~|\$|\.\.)[^:]*:/m;
+  const unsafeLongSource  = /^\s+source:\s+["']?(\/|~|\$|\.\.)/m;
+
+  if (unsafeShortSource.test(content) || unsafeLongSource.test(content)) {
     throw new Error(
-      `job "${jobName}": host-path volume mounts (e.g. /host/path:/container) are not permitted in CI compose files`,
+      `job "${jobName}": host-path volume mounts are not permitted in CI compose files`,
     );
   }
 }
 
 /**
- * Returns the argv for a shell command, wrapping with `unshare --net` on
- * Linux when network isolation is requested.
+ * Returns the argv for a shell command.
+ *
+ * netIsolate: wrap with `unshare --net` (Linux only, when available).
+ * useSetsid:  wrap with `setsid` so the shell becomes its own session/process-
+ *             group leader. When true, proc.pid == pgid, enabling callers to
+ *             kill lingering background processes via `kill -9 -<pid>`.
  */
-export function buildShellCmdArgs(cmd: string, netIsolate: boolean): string[] {
-  return netIsolate
+export function buildShellCmdArgs(
+  cmd: string,
+  netIsolate: boolean,
+  useSetsid = false,
+): string[] {
+  const inner: string[] = netIsolate
     ? ["unshare", "--net", "sh", "-c", cmd]
     : ["sh", "-c", cmd];
+  return useSetsid ? ["setsid", ...inner] : inner;
 }
 
 /**
@@ -213,7 +240,7 @@ async function runDockerJob(
   const args = ["compose", "-f", composeFile, "run", "--rm", ...envArgs, svc];
 
   try {
-    return await spawnAndLog("docker", args, { env: buildDockerEnv(secrets) }, secrets, onLog);
+    return (await spawnAndLog("docker", args, { env: buildDockerEnv(secrets) }, secrets, onLog)).exitCode;
   } finally {
     if (tmpComposeFile) {
       await fs.unlink(tmpComposeFile).catch(() => {});
@@ -290,17 +317,26 @@ async function runShellJob(
   // Isolate network only when the runner config allows it (Linux only, and
   // unshare must be available — the startup probe sets network_isolation=false
   // on hosts where it isn't), and the job hasn't opted out with network: true.
+  // Use setsid on Linux when running as a dedicated jobs user: the shell
+  // becomes its own session/process-group leader (proc.pid == pgid), which
+  // lets us kill any background processes it left behind before the next job
+  // (which may carry MESH_PUSH_TOKEN) starts.
+  const useSetsid = process.platform === "linux" && jobsUid > 0;
   const netIsolate = networkIsolation && process.platform === "linux" && !job.network;
   let lastExit = 0;
   for (const cmd of job.commands) {
-    const argv = buildShellCmdArgs(cmd, netIsolate);
-    const exit = await spawnAndLog(
+    const argv = buildShellCmdArgs(cmd, netIsolate, useSetsid);
+    const { exitCode, pid } = await spawnAndLog(
       argv[0]!, argv.slice(1),
       { cwd: worktree, env, uid: jobsUid || undefined, gid: jobsGid || undefined },
       secrets, onLog,
     );
-    if (exit !== 0) return exit;
-    lastExit = exit;
+    // Kill any processes the command left behind (e.g. `sleep & ; do_work`).
+    // A lingering uid=jobs_uid process could read /proc/<next-job-pid>/environ
+    // and steal MESH_PUSH_TOKEN from a later push: true job in the same run.
+    if (useSetsid) await killProcessGroup(pid, jobsUid, jobsGid);
+    if (exitCode !== 0) return exitCode;
+    lastExit = exitCode;
   }
   return lastExit;
 }
@@ -313,7 +349,7 @@ async function spawnAndLog(
   opts: { cwd?: string; env?: Record<string, string>; uid?: number; gid?: number },
   secrets: Record<string, string>,
   onLog: (line: string) => Promise<void>,
-): Promise<number> {
+): Promise<{ exitCode: number; pid: number }> {
   // Explicit generics fix: uid/gid are missing from bun-types 1.3.14 so we
   // cast options through unknown. The explicit <"ignore","pipe","pipe"> tells
   // TypeScript the return shape (proc.stdout/stderr are ReadableStream), which
@@ -347,7 +383,25 @@ async function spawnAndLog(
 
   await Promise.all([drainStream(proc.stdout), drainStream(proc.stderr, "[stderr] ")]);
   await proc.exited;
-  return proc.exitCode ?? 1;
+  return { exitCode: proc.exitCode ?? 1, pid: proc.pid };
+}
+
+/**
+ * Sends SIGKILL to every process in the given process group, running the
+ * kill command as jobs_uid so it has permission to signal jobs_uid processes.
+ * Errors are silently swallowed: the group may already be empty.
+ *
+ * Pre-condition: the target process was spawned with `setsid` so that
+ * proc.pid == pgid (the process became its own session and group leader).
+ */
+async function killProcessGroup(pgid: number, uid: number, gid: number): Promise<void> {
+  const proc = Bun.spawn<"ignore", "ignore", "ignore">(
+    ["kill", "-9", `-${pgid}`],
+    { uid, gid, stdout: "ignore", stderr: "ignore" } as unknown as Parameters<
+      typeof Bun.spawn<"ignore", "ignore", "ignore">
+    >[1],
+  );
+  await proc.exited.catch(() => {});
 }
 
 // ---------- worktree management ----------

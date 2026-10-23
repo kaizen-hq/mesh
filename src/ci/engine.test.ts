@@ -287,6 +287,110 @@ services:
 `;
     expect(() => validateComposeFile(yaml, "build")).not.toThrow();
   });
+
+  // --- short syntax: tilde, env-var, traversal ---
+
+  it("rejects short-syntax tilde source (~/path:/container)", () => {
+    const yaml = `
+services:
+  app:
+    volumes:
+      - ~/.mesh:/steal
+`;
+    expect(() => validateComposeFile(yaml, "exfil")).toThrow(/host-path volume/);
+  });
+
+  it("rejects short-syntax braced env-var source (${HOME}/path:/container)", () => {
+    const yaml = `
+services:
+  app:
+    volumes:
+      - \${HOME}/.mesh:/steal
+`;
+    expect(() => validateComposeFile(yaml, "exfil")).toThrow(/host-path volume/);
+  });
+
+  it("rejects short-syntax unbraced env-var source ($HOME:/container)", () => {
+    const yaml = `
+services:
+  app:
+    volumes:
+      - $HOME/.mesh:/steal
+`;
+    expect(() => validateComposeFile(yaml, "exfil")).toThrow(/host-path volume/);
+  });
+
+  it("rejects short-syntax path traversal out of worktree (../../..:/container)", () => {
+    const yaml = `
+services:
+  app:
+    volumes:
+      - ../../etc/passwd:/steal
+`;
+    expect(() => validateComposeFile(yaml, "exfil")).toThrow(/host-path volume/);
+  });
+
+  // --- long syntax (type: bind / source:) ---
+
+  it("rejects long-syntax absolute source", () => {
+    const yaml = `
+services:
+  app:
+    volumes:
+      - type: bind
+        source: /home/mesh/.mesh
+        target: /steal
+`;
+    expect(() => validateComposeFile(yaml, "exfil")).toThrow(/host-path volume/);
+  });
+
+  it("rejects long-syntax tilde source", () => {
+    const yaml = `
+services:
+  app:
+    volumes:
+      - type: bind
+        source: ~/.mesh
+        target: /steal
+`;
+    expect(() => validateComposeFile(yaml, "exfil")).toThrow(/host-path volume/);
+  });
+
+  it("rejects long-syntax braced env-var source", () => {
+    const yaml = `
+services:
+  app:
+    volumes:
+      - type: bind
+        source: \${HOME}/.mesh
+        target: /steal
+`;
+    expect(() => validateComposeFile(yaml, "exfil")).toThrow(/host-path volume/);
+  });
+
+  it("rejects long-syntax traversal source", () => {
+    const yaml = `
+services:
+  app:
+    volumes:
+      - type: bind
+        source: ../../etc
+        target: /steal
+`;
+    expect(() => validateComposeFile(yaml, "exfil")).toThrow(/host-path volume/);
+  });
+
+  it("accepts long-syntax named volume source", () => {
+    const yaml = `
+services:
+  app:
+    volumes:
+      - type: volume
+        source: node_cache
+        target: /root/.npm
+`;
+    expect(() => validateComposeFile(yaml, "build")).not.toThrow();
+  });
 });
 
 // ---------- buildShellCmdArgs ----------
@@ -306,6 +410,18 @@ describe("buildShellCmdArgs", () => {
     const cmd = `bun install && bun run build`;
     expect(buildShellCmdArgs(cmd, false)).toEqual(["sh", "-c", cmd]);
     expect(buildShellCmdArgs(cmd, true)).toEqual(["unshare", "--net", "sh", "-c", cmd]);
+  });
+
+  it("prepends setsid when useSetsid is true", () => {
+    expect(buildShellCmdArgs("echo hello", false, true)).toEqual([
+      "setsid", "sh", "-c", "echo hello",
+    ]);
+  });
+
+  it("prepends setsid before unshare when both flags are set", () => {
+    expect(buildShellCmdArgs("echo hello", true, true)).toEqual([
+      "setsid", "unshare", "--net", "sh", "-c", "echo hello",
+    ]);
   });
 });
 
