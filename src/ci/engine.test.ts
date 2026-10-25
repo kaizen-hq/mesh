@@ -4,7 +4,6 @@ import {
   topologicalOrder,
   collectSkipped,
   validateComposeFile,
-  buildShellCmdArgs,
   buildJobSecrets,
   type JobDAG,
 } from "./engine.ts";
@@ -12,7 +11,6 @@ import type { JobDefinition } from "./types.ts";
 
 function makeJob(overrides: Partial<JobDefinition> = {}): JobDefinition {
   return {
-    mode: "docker",
     commands: ["echo ok"],
     depends_on: [],
     secrets: [],
@@ -431,38 +429,6 @@ services:
     volumes: ["/workspace"]
 `;
     expect(() => validateComposeFile(yaml, "build")).not.toThrow();
-  });
-});
-
-// ---------- buildShellCmdArgs ----------
-
-describe("buildShellCmdArgs", () => {
-  it("returns plain sh argv when netIsolate is false", () => {
-    expect(buildShellCmdArgs("echo hello", false)).toEqual(["sh", "-c", "echo hello"]);
-  });
-
-  it("prepends unshare --net when netIsolate is true", () => {
-    expect(buildShellCmdArgs("echo hello", true)).toEqual([
-      "unshare", "--net", "sh", "-c", "echo hello",
-    ]);
-  });
-
-  it("preserves the full command string including spaces and quotes", () => {
-    const cmd = `bun install && bun run build`;
-    expect(buildShellCmdArgs(cmd, false)).toEqual(["sh", "-c", cmd]);
-    expect(buildShellCmdArgs(cmd, true)).toEqual(["unshare", "--net", "sh", "-c", cmd]);
-  });
-
-  it("prepends setsid when useSetsid is true", () => {
-    expect(buildShellCmdArgs("echo hello", false, true)).toEqual([
-      "setsid", "sh", "-c", "echo hello",
-    ]);
-  });
-
-  it("prepends setsid before unshare when both flags are set", () => {
-    expect(buildShellCmdArgs("echo hello", true, true)).toEqual([
-      "setsid", "unshare", "--net", "sh", "-c", "echo hello",
-    ]);
   });
 });
 

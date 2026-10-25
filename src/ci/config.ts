@@ -46,11 +46,16 @@ export function parsePipeline(src: string): Pipeline {
     const secrets: string[] = Array.isArray(raw.secrets)
       ? (raw.secrets as unknown[]).map(String)
       : [];
-    const modeRaw = typeof raw.mode === "string" ? raw.mode : "docker";
-    const mode: "docker" | "shell" = modeRaw === "shell" ? "shell" : "docker";
+    // TODO: remove this check after November 1st, 2026.
+    if (raw.mode === "shell") {
+      throw new Error(
+        `job "${jobName}": mode: shell is no longer supported. ` +
+        `All jobs run in containers. Use mode: docker (or omit mode) ` +
+        `with an image: or compose: field instead.`,
+      );
+    }
 
     jobs[jobName] = {
-      mode,
       image: typeof raw.image === "string" ? raw.image : undefined,
       compose: typeof raw.compose === "string" ? raw.compose : undefined,
       service: typeof raw.service === "string" ? raw.service : undefined,
@@ -58,7 +63,6 @@ export function parsePipeline(src: string): Pipeline {
       depends_on,
       secrets,
       push: raw.push === true,
-      network: raw.network === true,
     };
   }
 

@@ -59,7 +59,7 @@ jobs:
     depends_on: [build]
 
   nightly-build:
-    mode: shell
+    image: oven/bun:1
     commands:
       - bun run build:full
 
@@ -86,10 +86,6 @@ describe("parsePipeline", () => {
     expect(p.jobs.test.commands).toEqual(["bun install", "bun test"]);
   });
 
-  it("defaults job mode to docker", () => {
-    const p = parsePipeline(MINIMAL_YAML);
-    expect(p.jobs.test.mode).toBe("docker");
-  });
 
   it("defaults depends_on to empty", () => {
     const p = parsePipeline(MINIMAL_YAML);
@@ -124,9 +120,20 @@ describe("parsePipeline", () => {
     expect(p.jobs.build.depends_on).toEqual(["test"]);
   });
 
-  it("parses shell mode", () => {
-    const p = parsePipeline(FULL_YAML);
-    expect(p.jobs["nightly-build"].mode).toBe("shell");
+  it("throws when mode: shell is used", () => {
+    const yaml = `
+pipeline:
+  name: test
+on:
+  manual: true
+runner:
+  labels: []
+jobs:
+  bad:
+    mode: shell
+    commands: [echo hi]
+`;
+    expect(() => parsePipeline(yaml)).toThrow(/mode: shell is no longer supported/);
   });
 
   it("parses compose job", () => {

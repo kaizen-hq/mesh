@@ -8,7 +8,6 @@ import type { Pipeline, PipelineRun, RunnerConfig } from "./types.ts";
 // ---------- helpers ----------
 
 async function initRepo(dir: string): Promise<string> {
-  // Init a bare-ish repo, commit one file, return the HEAD sha.
   const run = (args: string[]) =>
     Bun.spawn(args, { cwd: dir, stdout: "pipe", stderr: "pipe" }).exited;
 
@@ -24,6 +23,12 @@ async function initRepo(dir: string): Promise<string> {
   });
   await shaProc.exited;
   return (await new Response(shaProc.stdout).text()).trim();
+}
+
+async function dockerAvailable(): Promise<boolean> {
+  const proc = Bun.spawn(["docker", "info"], { stdout: "ignore", stderr: "ignore" });
+  await proc.exited;
+  return proc.exitCode === 0;
 }
 
 function makeTmpDir(): Promise<string> {
@@ -48,19 +53,15 @@ function makeRun(overrides: Partial<PipelineRun> = {}): PipelineRun {
 function makeRunnerConfig(workdir: string, overrides: Partial<RunnerConfig> = {}): RunnerConfig {
   return {
     enabled: true,
-    execution_modes: ["shell"],
     labels: [],
     max_concurrent_jobs: 4,
     workdir,
     tools: [],
-    env_passthrough: [],
     log_stream_interval_ms: 100,
     max_worktree_age_minutes: 60,
     max_worktree_disk_mb: 512,
     log_retention_runs: 10,
-    network_isolation: false,
-    jobs_uid: 0,
-    jobs_gid: 0,
+    git_url: "",
     ...overrides,
   };
 }
@@ -134,15 +135,17 @@ describe("removeWorktree", () => {
   });
 });
 
-// ---------- runPipeline ----------
+// ---------- runPipeline (docker mode, requires Docker) ----------
 
-describe("runPipeline (shell mode)", () => {
+describe("runPipeline (docker mode)", () => {
   let repoDir: string;
   let workdir: string;
   let meshRoot: string;
   let sha: string;
+  let hasDocker: boolean;
 
   beforeEach(async () => {
+    hasDocker = await dockerAvailable();
     repoDir = await makeTmpDir();
     workdir = await makeTmpDir();
     meshRoot = await makeTmpDir();
@@ -155,13 +158,14 @@ describe("runPipeline (shell mode)", () => {
     await fs.rm(meshRoot, { recursive: true, force: true });
   });
 
-  it("runs a single shell job and returns passed", async () => {
+  it("runs a single docker job and returns passed", async () => {
+    if (!hasDocker) return;
     const pipeline: Pipeline = {
       name: "test",
       on: { manual: true },
       runner: { labels: [], fallback: "none" },
       jobs: {
-        hello: { mode: "shell", commands: ["echo hello"], depends_on: [], secrets: [] },
+        hello: { image: "alpine:3", commands: ["echo hello"], depends_on: [], secrets: [] },
       },
     };
     const run = makeRun({ sha, repo: "test-repo" });
@@ -177,12 +181,13 @@ describe("runPipeline (shell mode)", () => {
   });
 
   it("returns failed when a command exits non-zero", async () => {
+    if (!hasDocker) return;
     const pipeline: Pipeline = {
       name: "test",
       on: { manual: true },
       runner: { labels: [], fallback: "none" },
       jobs: {
-        fail: { mode: "shell", commands: ["exit 1"], depends_on: [], secrets: [] },
+        fail: { image: "alpine:3", commands: ["exit 1"], depends_on: [], secrets: [] },
       },
     };
     const run = makeRun({ sha, repo: "test-repo" });
@@ -197,14 +202,15 @@ describe("runPipeline (shell mode)", () => {
   });
 
   it("runs jobs in dependency order", async () => {
+    if (!hasDocker) return;
     const order: string[] = [];
     const pipeline: Pipeline = {
       name: "test",
       on: { manual: true },
       runner: { labels: [], fallback: "none" },
       jobs: {
-        build: { mode: "shell", commands: ["echo build"], depends_on: ["test"], secrets: [] },
-        test: { mode: "shell", commands: ["echo test"], depends_on: [], secrets: [] },
+        build: { image: "alpine:3", commands: ["echo build"], depends_on: ["test"], secrets: [] },
+        test: { image: "alpine:3", commands: ["echo test"], depends_on: [], secrets: [] },
       },
     };
     const run = makeRun({ sha, repo: "test-repo" });
@@ -220,14 +226,15 @@ describe("runPipeline (shell mode)", () => {
   });
 
   it("skips downstream jobs when an upstream job fails", async () => {
+    if (!hasDocker) return;
     const pipeline: Pipeline = {
       name: "test",
       on: { manual: true },
       runner: { labels: [], fallback: "none" },
       jobs: {
-        test: { mode: "shell", commands: ["exit 1"], depends_on: [], secrets: [] },
-        build: { mode: "shell", commands: ["echo build"], depends_on: ["test"], secrets: [] },
-        deploy: { mode: "shell", commands: ["echo deploy"], depends_on: ["build"], secrets: [] },
+        test: { image: "alpine:3", commands: ["exit 1"], depends_on: [], secrets: [] },
+        build: { image: "alpine:3", commands: ["echo build"], depends_on: ["test"], secrets: [] },
+        deploy: { image: "alpine:3", commands: ["echo deploy"], depends_on: ["build"], secrets: [] },
       },
     };
     const run = makeRun({ sha, repo: "test-repo" });
@@ -243,63 +250,45 @@ describe("runPipeline (shell mode)", () => {
     expect(result.jobs["deploy"]?.status).toBe("skipped");
   });
 
-  it("exposes MESH_SHA, MESH_REF, MESH_RUN_ID to shell jobs", async () => {
-    const outFile = path.join(meshRoot, "env-out.txt");
+  it("injects MESH_SHA, MESH_REF, MESH_RUN_ID into containers", async () => {
+    if (!hasDocker) return;
     const pipeline: Pipeline = {
       name: "test",
       on: { manual: true },
       runner: { labels: [], fallback: "none" },
       jobs: {
         env: {
-          mode: "shell",
-          commands: [`echo "$MESH_SHA $MESH_REF $MESH_RUN_ID" > ${outFile}`],
+          image: "alpine:3",
+          commands: [`echo "$MESH_SHA $MESH_REF $MESH_RUN_ID"`],
           depends_on: [],
           secrets: [],
         },
       },
     };
     const run = makeRun({ sha, repo: "test-repo" });
+    let logOut = "";
     const result = await runPipeline(pipeline, run, {
       root: meshRoot,
       repoPath: repoDir,
       runnerConfig: makeRunnerConfig(workdir),
       secrets: {},
+      onLog: async (_runId, _jobName, line) => { logOut += line; },
     });
     expect(result.status).toBe("passed");
-    const out = await fs.readFile(outFile, "utf8");
-    expect(out).toContain(sha);
-    expect(out).toContain("refs/heads/main");
-    expect(out).toContain(run.run_id);
-  });
-
-  it("rejects shell mode when execution_modes does not include shell", async () => {
-    const pipeline: Pipeline = {
-      name: "test",
-      on: { manual: true },
-      runner: { labels: [], fallback: "none" },
-      jobs: {
-        hello: { mode: "shell", commands: ["echo hello"], depends_on: [], secrets: [] },
-      },
-    };
-    const run = makeRun({ sha, repo: "test-repo" });
-    const result = await runPipeline(pipeline, run, {
-      root: meshRoot,
-      repoPath: repoDir,
-      runnerConfig: makeRunnerConfig(workdir, { execution_modes: ["docker"] }),
-      secrets: {},
-    });
-    expect(result.status).toBe("failed");
-    expect(result.jobs["hello"]?.status).toBe("failed");
+    expect(logOut).toContain(sha);
+    expect(logOut).toContain("refs/heads/main");
+    expect(logOut).toContain(run.run_id);
   });
 
   it("calls onRunUpdate with status transitions", async () => {
+    if (!hasDocker) return;
     const updates: string[] = [];
     const pipeline: Pipeline = {
       name: "test",
       on: { manual: true },
       runner: { labels: [], fallback: "none" },
       jobs: {
-        hello: { mode: "shell", commands: ["echo hello"], depends_on: [], secrets: [] },
+        hello: { image: "alpine:3", commands: ["echo hello"], depends_on: [], secrets: [] },
       },
     };
     const run = makeRun({ sha, repo: "test-repo" });

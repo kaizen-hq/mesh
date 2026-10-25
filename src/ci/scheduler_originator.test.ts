@@ -37,7 +37,7 @@ runner:
 
 jobs:
   test:
-    mode: shell
+    image: alpine
     commands:
       - echo hello
 `.trimStart();
@@ -102,15 +102,14 @@ async function makeCtx(root: string): Promise<SchedulerCtx> {
       runner: {
         enabled: true,
         max_concurrent_jobs: 4,
-        execution_modes: ["shell"],
         labels: [],
         tools: [],
-        env_passthrough: [],
         workdir: path.join(root, "workdir"),
         log_stream_interval_ms: 500,
         max_worktree_age_minutes: 60,
         max_worktree_disk_mb: 2048,
         log_retention_runs: 50,
+        git_url: "",
       },
       transport: { tls: false, poll_secs: 30 },
       peers: [],

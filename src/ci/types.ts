@@ -21,19 +21,15 @@ export interface RunnerRequirements {
 }
 
 export interface JobDefinition {
-  mode: "docker" | "shell";
   image?: string;
   compose?: string;
   service?: string;
   commands: string[];
   depends_on: string[];
   secrets: string[];
-  // Set to true to allow this job to push to the mesh daemon.
-  // The runner will inject MESH_PUSH_TOKEN into the job's environment.
+  // Set to true to allow this job to push to the mesh daemon's git endpoint.
+  // The runner injects MESH_PUSH_TOKEN and MESH_GIT_URL into the container.
   push?: boolean;
-  // Shell-mode only: set to true if the job needs outbound network access.
-  // By default shell jobs run in an isolated network namespace on Linux.
-  network?: boolean;
 }
 
 // ---------- runtime run state ----------
@@ -118,27 +114,20 @@ export interface CronClaim {
 
 export interface RunnerConfig {
   enabled: boolean;
-  execution_modes: string[];
   labels: string[];
   max_concurrent_jobs: number;
   workdir: string;
   tools: string[];
-  env_passthrough: string[];
   log_stream_interval_ms: number;
   max_worktree_age_minutes: number;
   max_worktree_disk_mb: number;
   log_retention_runs: number;
-  // Whether to wrap shell jobs in `unshare --net` on Linux.
-  // Set to false on hosts where unprivileged user namespaces are disabled
-  // (e.g. hardened kernels, non-root runners without CAP_SYS_ADMIN).
-  // The startup probe auto-disables this if unshare is unavailable.
-  network_isolation: boolean;
-  // uid/gid to run shell jobs as. 0 = disabled (jobs run as the daemon user).
-  // Requires CAP_SETUID/CAP_SETGID on the daemon process.
-  // Set to a dedicated low-privilege user (e.g. mesh-jobs, uid=65533) so that
-  // shell jobs cannot read or write ~/.mesh even on the same host.
-  jobs_uid: number;
-  jobs_gid: number;
+  // Address of this daemon's git endpoint, injected into every job container
+  // as MESH_GIT_URL so jobs can push to mesh-gitops without hardcoding
+  // localhost (which is unreachable from inside a container).
+  // Example: "https://host.docker.internal:7979" on Docker Desktop,
+  //          "https://mesh-ci-runner.ci.svc.cluster.local:7979" in k3s.
+  git_url: string;
 }
 
 export function emptyCiState(): CiState {

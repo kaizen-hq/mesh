@@ -1,8 +1,7 @@
-// Job execution: worktree setup, Docker and shell runners, job DAG.
+// Job execution: worktree setup, Docker runner, job DAG.
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import * as os from "node:os";
 import type { Pipeline, JobDefinition, PipelineRun, JobRun, RunnerConfig } from "./types.ts";
 import { appendLogChunk, saveRun } from "./store.ts";
 
@@ -138,14 +137,28 @@ function isUnsafeVolumeSource(src: string): boolean {
  *   - Long syntax:       volumes:\n  - type: bind\n    source: /host
  */
 export function validateComposeFile(content: string, jobName: string): void {
+  // Reject host networking — escapes the container's network namespace.
   if (/network_mode\s*:\s*["']?host["']?/.test(content)) {
     throw new Error(
       `job "${jobName}": network_mode: host is not permitted in CI compose files`,
     );
   }
+  // Reject privileged mode — grants all Linux capabilities.
   if (/^\s+privileged\s*:\s*true/m.test(content)) {
     throw new Error(
       `job "${jobName}": privileged: true is not permitted in CI compose files`,
+    );
+  }
+  // Reject pid: host — shares the host PID namespace, exposing all processes.
+  if (/^\s+pid\s*:\s*["']?host["']?/m.test(content)) {
+    throw new Error(
+      `job "${jobName}": pid: host is not permitted in CI compose files`,
+    );
+  }
+  // Reject ipc: host — shares the host IPC namespace.
+  if (/^\s+ipc\s*:\s*["']?host["']?/m.test(content)) {
+    throw new Error(
+      `job "${jobName}": ipc: host is not permitted in CI compose files`,
     );
   }
 
@@ -166,7 +179,42 @@ export function validateComposeFile(content: string, jobName: string): void {
 
   for (const [, svc] of Object.entries(services as Record<string, unknown>)) {
     if (svc == null || typeof svc !== "object") continue;
-    const volumes = (svc as Record<string, unknown>)["volumes"];
+    const svcObj = svc as Record<string, unknown>;
+
+    // Reject cap_add with dangerous capabilities.
+    const capAdd = svcObj["cap_add"];
+    if (Array.isArray(capAdd)) {
+      const dangerous = new Set([
+        "SYS_ADMIN", "SYS_PTRACE", "NET_ADMIN", "SYS_MODULE",
+        "SYS_RAWIO", "SYS_BOOT", "SYS_TIME", "MAC_ADMIN",
+        "AUDIT_CONTROL", "DAC_READ_SEARCH", "SETUID", "SETGID",
+      ]);
+      for (const cap of capAdd) {
+        if (typeof cap === "string" && dangerous.has(cap.toUpperCase())) {
+          throw new Error(
+            `job "${jobName}": cap_add: ${cap} is not permitted in CI compose files`,
+          );
+        }
+      }
+    }
+
+    // Reject security_opt entries that disable security profiles.
+    const secOpts = svcObj["security_opt"];
+    if (Array.isArray(secOpts)) {
+      for (const opt of secOpts) {
+        if (typeof opt === "string") {
+          const lower = opt.toLowerCase();
+          if (lower.includes("apparmor=unconfined") || lower.includes("seccomp=unconfined") || lower.includes("seccomp:unconfined")) {
+            throw new Error(
+              `job "${jobName}": security_opt: ${opt} is not permitted in CI compose files`,
+            );
+          }
+        }
+      }
+    }
+
+    // Validate volumes.
+    const volumes = svcObj["volumes"];
     if (!Array.isArray(volumes)) continue;
 
     for (const vol of volumes) {
@@ -195,25 +243,6 @@ export function validateComposeFile(content: string, jobName: string): void {
 }
 
 /**
- * Returns the argv for a shell command.
- *
- * netIsolate: wrap with `unshare --net` (Linux only, when available).
- * useSetsid:  wrap with `setsid` so the shell becomes its own session/process-
- *             group leader. When true, proc.pid == pgid, enabling callers to
- *             kill lingering background processes via `kill -9 -<pid>`.
- */
-export function buildShellCmdArgs(
-  cmd: string,
-  netIsolate: boolean,
-  useSetsid = false,
-): string[] {
-  const inner: string[] = netIsolate
-    ? ["unshare", "--net", "sh", "-c", cmd]
-    : ["sh", "-c", cmd];
-  return useSetsid ? ["setsid", ...inner] : inner;
-}
-
-/**
  * Merges run-level secrets with job-level overrides. Injects MESH_PUSH_TOKEN
  * only when the job declares push: true and a token is available.
  */
@@ -231,50 +260,66 @@ export function buildJobSecrets(
 
 // ---------- docker execution ----------
 
-async function runDockerJob(
-  job: JobDefinition,
-  jobName: string,
-  worktree: string,
-  secrets: Record<string, string>,
-  onLog: (line: string) => Promise<void>,
-): Promise<number> {
-  let composeFile: string | null = null;
-  let tmpComposeFile: string | null = null;
+interface DockerJobOpts {
+  jobName: string;
+  worktree: string;
+  secrets: Record<string, string>;
+  // Mesh-provided variables injected into every container.
+  meshVars: { sha: string; ref: string; runId: string; gitUrl: string };
+  onLog: (line: string) => Promise<void>;
+}
 
-  if (job.compose && job.service) {
-    composeFile = path.join(worktree, job.compose);
-    const raw = await fs.readFile(composeFile, "utf8").catch(() => "");
-    validateComposeFile(raw, jobName);
-  } else if (job.image) {
-    // Generate an ephemeral docker-compose.yml
-    const secretEnv = job.secrets
-      .map((s) => `      ${s}: \${${s}}`)
-      .join("\n");
-    const envBlock = secretEnv ? `    environment:\n${secretEnv}` : "";
-    const yaml = `version: "3"\nservices:\n  ${jobName}:\n    image: ${job.image}\n    volumes:\n      - ${worktree}:/workspace\n    working_dir: /workspace\n${envBlock}    command: ["/bin/sh", "-c", ${JSON.stringify(job.commands.join(" && "))}]\n`;
-    tmpComposeFile = path.join(os.tmpdir(), `mesh-ci-${Date.now()}-${jobName}.yml`);
-    await fs.writeFile(tmpComposeFile, yaml, "utf8");
-    composeFile = tmpComposeFile;
-  } else {
-    throw new Error(`job "${jobName}": docker mode requires image or compose+service`);
+async function runDockerJob(job: JobDefinition, opts: DockerJobOpts): Promise<number> {
+  const { jobName, worktree, secrets, meshVars, onLog } = opts;
+
+  // Mesh-injected vars: always present in every container.
+  const meshEnvArgs: string[] = [
+    "--env", `MESH_SHA=${meshVars.sha}`,
+    "--env", `MESH_REF=${meshVars.ref}`,
+    "--env", `MESH_RUN_ID=${meshVars.runId}`,
+  ];
+  if (meshVars.gitUrl) {
+    meshEnvArgs.push("--env", `MESH_GIT_URL=${meshVars.gitUrl}`);
+  }
+  // Push token: only for jobs with push: true (already in secrets via buildJobSecrets).
+  const pushToken = secrets["MESH_PUSH_TOKEN"];
+  if (pushToken) {
+    meshEnvArgs.push("--env", `MESH_PUSH_TOKEN=${pushToken}`);
   }
 
-  const svc = job.service ?? jobName;
+  // User-declared secrets (from secrets.yml, filtered to what this job listed).
   const envArgs: string[] = [];
   for (const s of job.secrets) {
+    if (s === "MESH_PUSH_TOKEN") continue; // injected via meshEnvArgs above
     const val = secrets[s];
     if (val !== undefined) envArgs.push("--env", `${s}=${val}`);
   }
 
-  const args = ["compose", "-f", composeFile, "run", "--rm", ...envArgs, svc];
-
-  try {
+  if (job.image) {
+    // Simple image job: use `docker run` directly — no compose dependency.
+    const args = [
+      "run", "--rm",
+      "--volume", `${worktree}:/workspace`,
+      "--workdir", "/workspace",
+      ...meshEnvArgs,
+      ...envArgs,
+      job.image,
+      "/bin/sh", "-c", job.commands.join(" && "),
+    ];
     return (await spawnAndLog("docker", args, { env: buildDockerEnv(secrets) }, secrets, onLog)).exitCode;
-  } finally {
-    if (tmpComposeFile) {
-      await fs.unlink(tmpComposeFile).catch(() => {});
-    }
   }
+
+  if (job.compose && job.service) {
+    // Compose job: validate the file then delegate to `docker compose run`.
+    const composeFile = path.join(worktree, job.compose);
+    const raw = await fs.readFile(composeFile, "utf8").catch(() => "");
+    validateComposeFile(raw, jobName);
+
+    const args = ["compose", "-f", composeFile, "run", "--rm", "--no-deps", ...meshEnvArgs, ...envArgs, job.service];
+    return (await spawnAndLog("docker", args, { env: buildDockerEnv(secrets) }, secrets, onLog)).exitCode;
+  }
+
+  throw new Error(`job "${jobName}": requires image: or compose: + service:`);
 }
 
 // ---------- docker execution environment ----------
@@ -289,7 +334,7 @@ function buildDockerEnv(secrets: Record<string, string>): Record<string, string>
   for (const key of [
     "PATH", "HOME", "TMPDIR", "TMP", "TEMP",
     "DOCKER_HOST", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "DOCKER_CONFIG",
-    "DOCKER_CONTEXT",
+    "DOCKER_CONTEXT", "BUILDKIT_HOST",
   ]) {
     const val = process.env[key];
     if (val !== undefined) env[key] = val;
@@ -298,134 +343,21 @@ function buildDockerEnv(secrets: Record<string, string>): Record<string, string>
   return { ...env, ...secrets };
 }
 
-// ---------- shell execution ----------
-
-// Build a minimal, explicit environment for shell jobs. The host process
-// environment is NOT inherited wholesale — only the baseline vars needed to
-// find tools and write temp files, plus whatever the operator declared in
-// [runner] env_passthrough, plus the job's secrets (highest priority).
-function buildShellEnv(
-  passthrough: string[],
-  secrets: Record<string, string>,
-  isolatedUser = false,
-): Record<string, string> {
-  const env: Record<string, string> = {};
-  // Always include enough to locate binaries and write temp files.
-  // Omit HOME when running as a different user: the daemon's home directory
-  // is not writable by the jobs uid, so passing it causes tool cache writes
-  // (npm, cargo, go) to fail. The job's HOME will be set by the caller.
-  for (const key of isolatedUser
-    ? ["PATH", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL"]
-    : ["PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL"]) {
-    const val = process.env[key];
-    if (val !== undefined) env[key] = val;
-  }
-  // Operator-declared host vars (SSH_AUTH_SOCK, GOPATH, DOCKER_HOST, etc.)
-  for (const key of passthrough) {
-    const val = process.env[key];
-    if (val !== undefined) env[key] = val;
-  }
-  // Secrets overlay last so they can never be shadowed by a host var.
-  return { ...env, ...secrets };
-}
-
-interface ShellJobOpts {
-  worktree: string;
-  jobHome?: string;
-  secrets: Record<string, string>;
-  envPassthrough: string[];
-  networkIsolation: boolean;
-  jobsUid: number;
-  jobsGid: number;
-  meshVars: { sha: string; ref: string; runId: string };
-  onLog: (line: string) => Promise<void>;
-}
-
-async function runShellJob(job: JobDefinition, opts: ShellJobOpts): Promise<number> {
-  const { worktree, jobHome, secrets, envPassthrough, networkIsolation, jobsUid, jobsGid, meshVars, onLog } = opts;
-  const env = buildShellEnv(envPassthrough, secrets, jobsUid > 0);
-  if (jobHome) env["HOME"] = jobHome;
-  // Expose the commit SHA, ref, and run ID so jobs don't need to query git
-  // (the worktree's .git points into ~/.mesh which the jobs user can't read).
-  env["MESH_SHA"] = meshVars.sha;
-  env["MESH_REF"] = meshVars.ref;
-  env["MESH_RUN_ID"] = meshVars.runId;
-
-  // Isolate network only when the runner config allows it (Linux only, and
-  // unshare must be available — the startup probe sets network_isolation=false
-  // on hosts where it isn't), and the job hasn't opted out with network: true.
-  // Use setsid on Linux when running as a dedicated jobs user: the shell
-  // becomes its own session/process-group leader (proc.pid == pgid), which
-  // lets us kill any background processes it left behind before the next job
-  // (which may carry MESH_PUSH_TOKEN) starts.
-  const useSetsid = process.platform === "linux" && jobsUid > 0;
-  const netIsolate = networkIsolation && process.platform === "linux" && !job.network;
-  let lastExit = 0;
-  for (const cmd of job.commands) {
-    const argv = buildShellCmdArgs(cmd, netIsolate, useSetsid);
-    const { exitCode, pid } = await spawnAndLog(
-      argv[0]!, argv.slice(1),
-      { cwd: worktree, env, uid: jobsUid || undefined, gid: jobsGid || undefined },
-      secrets, onLog,
-      // Register the pid synchronously after spawn so the active set reflects
-      // every running job command at all times, including during concurrent runs.
-      useSetsid ? (p) => activeShellJobPgids.add(p) : undefined,
-    );
-
-    if (useSetsid) {
-      // Phase 1: kill processes in the shell's own process group (the common
-      // case — background procs from `cmd & ; do_work` stay in the same pgid).
-      await killProcessGroup(pid, jobsUid, jobsGid);
-
-      // Phase 2: /proc-based sweep for setsid-escaped orphans. Remove this
-      // command's pgid from the active set first, then scan /proc skipping any
-      // pgid that still belongs to a concurrently-running job command. This is
-      // race-free: the live activePgids set is checked per-process inside the
-      // scan, so a job that starts between phase 1 and phase 2 is spared.
-      activeShellJobPgids.delete(pid);
-      await killJobsUidOrphans(jobsUid, jobsGid, activeShellJobPgids);
-    }
-
-    if (exitCode !== 0) return exitCode;
-    lastExit = exitCode;
-  }
-  return lastExit;
-}
-
 // ---------- spawn helper ----------
-
-// PIDs of shell-job commands that are currently running (across all concurrent
-// pipeline runs). Each command is wrapped with setsid so pid == pgid. A pid is
-// added synchronously right after Bun.spawn returns (before any await), so the
-// set always reflects the live set of running job pgids.
-const activeShellJobPgids = new Set<number>();
 
 async function spawnAndLog(
   cmd: string,
   args: string[],
-  opts: { cwd?: string; env?: Record<string, string>; uid?: number; gid?: number },
+  opts: { cwd?: string; env?: Record<string, string> },
   secrets: Record<string, string>,
   onLog: (line: string) => Promise<void>,
-  // Called synchronously after spawn, before any await, so callers can register
-  // the pid in activeShellJobPgids while the process is still running.
-  onPid?: (pid: number) => void,
 ): Promise<{ exitCode: number; pid: number }> {
-  // Explicit generics fix: uid/gid are missing from bun-types 1.3.14 so we
-  // cast options through unknown. The explicit <"ignore","pipe","pipe"> tells
-  // TypeScript the return shape (proc.stdout/stderr are ReadableStream), which
-  // the cast would otherwise erase.
-  const proc = Bun.spawn<"ignore", "pipe", "pipe">([cmd, ...args], {
+  const proc = Bun.spawn([cmd, ...args], {
     cwd: opts.cwd,
     env: opts.env,
-    uid: opts.uid,
-    gid: opts.gid,
     stdout: "pipe",
     stderr: "pipe",
-  } as unknown as Parameters<typeof Bun.spawn<"ignore", "pipe", "pipe">>[1]);
-
-  // Register before any await so the pid is in the active set for the entire
-  // duration of the process, including when concurrent cleanup runs check it.
-  onPid?.(proc.pid);
+  });
 
   const dec = new TextDecoder();
 
@@ -450,84 +382,6 @@ async function spawnAndLog(
   return { exitCode: proc.exitCode ?? 1, pid: proc.pid };
 }
 
-/**
- * Sends SIGKILL to every process in the given process group.
- * `kill` is a shell built-in on minimal images (no /bin/kill binary), so we
- * invoke it via sh. Errors are silently swallowed: the group may be empty.
- *
- * Pre-condition: the target process was spawned with `setsid` so that
- * proc.pid == pgid (the process became its own session and group leader).
- */
-async function killProcessGroup(pgid: number, uid: number, gid: number): Promise<void> {
-  const proc = Bun.spawn<"ignore", "ignore", "ignore">(
-    ["sh", "-c", `kill -9 -- -${pgid}`],
-    { uid, gid, stdout: "ignore", stderr: "ignore" } as unknown as Parameters<
-      typeof Bun.spawn<"ignore", "ignore", "ignore">
-    >[1],
-  );
-  await proc.exited.catch(() => {});
-}
-
-/**
- * Scans /proc and kills every process owned by jobs_uid whose pgid is NOT in
- * activePgids. This catches processes that escaped their job's process group by
- * calling setsid/setpgrp themselves (e.g. `setsid sleep 600 &`).
- *
- * Safe to call concurrently with other running jobs: only processes whose pgid
- * is absent from activePgids (i.e. not belonging to any currently-running job
- * command) are targeted.
- */
-async function killJobsUidOrphans(
-  jobsUid: number,
-  jobsGid: number,
-  activePgids: ReadonlySet<number>,
-): Promise<void> {
-  if (process.platform !== "linux") return;
-  let entries: string[];
-  try {
-    entries = await fs.readdir("/proc");
-  } catch {
-    return;
-  }
-
-  const toKill: number[] = [];
-  for (const entry of entries) {
-    const pid = parseInt(entry, 10);
-    if (!Number.isFinite(pid) || pid <= 0) continue;
-    try {
-      // Read the process group ID from /proc/<pid>/stat.
-      // Format: pid (comm) state ppid pgrp ...
-      // The comm field can contain spaces and parentheses, so we scan from the
-      // last ')' forward: after ')' + one space is state, then ppid, then pgrp.
-      const stat = await fs.readFile(`/proc/${pid}/stat`, "utf8");
-      const close = stat.lastIndexOf(")");
-      if (close === -1) continue;
-      const after = stat.slice(close + 2).trimStart().split(/\s+/);
-      // after[0]=state, after[1]=ppid, after[2]=pgrp
-      const pgid = parseInt(after[2] ?? "0", 10);
-      if (activePgids.has(pgid)) continue; // spare active job commands
-
-      // Read the effective uid from /proc/<pid>/status.
-      const status = await fs.readFile(`/proc/${pid}/status`, "utf8");
-      const uidLine = status.match(/^Uid:\s+\d+\s+(\d+)/m); // effective uid field
-      if (!uidLine || parseInt(uidLine[1]!, 10) !== jobsUid) continue;
-
-      toKill.push(pid);
-    } catch {
-      // Process exited between readdir and stat/status read — ignore.
-    }
-  }
-
-  if (toKill.length === 0) return;
-  const proc = Bun.spawn<"ignore", "ignore", "ignore">(
-    ["sh", "-c", `kill -9 ${toKill.join(" ")} 2>/dev/null; true`],
-    { uid: jobsUid, gid: jobsGid, stdout: "ignore", stderr: "ignore" } as unknown as Parameters<
-      typeof Bun.spawn<"ignore", "ignore", "ignore">
-    >[1],
-  );
-  await proc.exited.catch(() => {});
-}
-
 // ---------- worktree management ----------
 
 export async function setupWorktree(
@@ -535,33 +389,10 @@ export async function setupWorktree(
   runId: string,
   sha: string,
   workdir: string,
-  jobsUid?: number,
-  jobsGid?: number,
 ): Promise<string> {
   await fs.mkdir(workdir, { recursive: true });
-  // 1777: sticky + world-writable, like /tmp itself. The sticky bit prevents
-  // uid=65533 (mesh-jobs) from deleting uid=1001 run dirs and vice versa.
-  // World-write is required so jobs uid can mkdir its own run subdir here.
   await fs.chmod(workdir, 0o1777);
   const dest = path.join(workdir, runId);
-
-  // When running jobs as a different user, pre-create the worktree directory
-  // owned by that user. Git accepts a pre-existing empty directory and will
-  // populate it with source files (owned by the daemon uid, read-only to the
-  // job — intentional). The job owns the directory itself, so it can freely
-  // create node_modules/, dist/, target/, etc. without CAP_CHOWN.
-  if (jobsUid && jobsGid) {
-    // -m 777: world-writable so uid=1001 (git worktree add) can create .git,
-    // and uid=65533 (job) can create node_modules/ etc. inside the same dir.
-    const mkdirProc = Bun.spawn<"ignore", "pipe", "pipe">(["mkdir", "-m", "777", dest], {
-      uid: jobsUid, gid: jobsGid, stdout: "pipe", stderr: "pipe",
-    } as unknown as Parameters<typeof Bun.spawn<"ignore", "pipe", "pipe">>[1]);
-    await mkdirProc.exited;
-    if (mkdirProc.exitCode !== 0) {
-      const stderr = await new Response(mkdirProc.stderr).text();
-      throw new Error(`mkdir ${dest} as uid=${jobsUid} failed (exit ${mkdirProc.exitCode}): ${stderr.trim()}`);
-    }
-  }
 
   const proc = Bun.spawn(["git", "worktree", "add", dest, sha], {
     cwd: repoPath,
@@ -579,18 +410,7 @@ export async function setupWorktree(
 export async function removeWorktree(
   repoPath: string,
   worktreePath: string,
-  jobsUid?: number,
-  jobsGid?: number,
 ): Promise<void> {
-  // When jobs ran as a different uid they own files inside the worktree that
-  // uid=1001 cannot delete. Run rm -rf as the jobs uid first so all
-  // jobs-owned files are removed, then let git deregister the worktree.
-  if (jobsUid && jobsGid) {
-    const rmProc = Bun.spawn<"ignore", "pipe", "pipe">(["rm", "-rf", worktreePath], {
-      uid: jobsUid, gid: jobsGid, stdout: "pipe", stderr: "pipe",
-    } as unknown as Parameters<typeof Bun.spawn<"ignore", "pipe", "pipe">>[1]);
-    await rmProc.exited;
-  }
   const proc = Bun.spawn(["git", "worktree", "remove", worktreePath, "--force"], {
     cwd: repoPath,
     stdout: "pipe",
@@ -626,14 +446,11 @@ export async function runPipeline(
   // Setup worktree
   let worktree: string;
   try {
-    worktree = await setupWorktree(
-      repoPath, run.run_id, run.sha, runnerConfig.workdir,
-      runnerConfig.jobs_uid || undefined, runnerConfig.jobs_gid || undefined,
-    );
+    worktree = await setupWorktree(repoPath, run.run_id, run.sha, runnerConfig.workdir);
   } catch (e) {
     run.status = "failed";
     run.completed_at = new Date().toISOString();
-    await saveRun(root, run).catch(() => {}); // best-effort; always re-throw the original error
+    await saveRun(root, run).catch(() => {});
     opts.onRunUpdate?.(run);
     throw e;
   }
@@ -642,18 +459,14 @@ export async function runPipeline(
   await saveRun(root, run);
   await opts.onRunUpdate?.(run);
 
-  // Create a per-run home directory for the jobs user once, shared across all
-  // shell jobs in this run. Cleaned up in the finally block alongside worktree.
-  let jobHome: string | undefined;
-  if (runnerConfig.jobs_uid > 0) {
-    jobHome = path.join(os.tmpdir(), `mesh-jobs-home-${run.run_id}`);
-    const mkHomeProc = Bun.spawn<"ignore", "pipe", "pipe">(["mkdir", "-p", jobHome], {
-      uid: runnerConfig.jobs_uid, gid: runnerConfig.jobs_gid, stdout: "pipe", stderr: "pipe",
-    } as unknown as Parameters<typeof Bun.spawn<"ignore", "pipe", "pipe">>[1]);
-    await mkHomeProc.exited;
-  }
-
   const failed = new Set<string>();
+
+  const meshVars = {
+    sha: run.sha,
+    ref: run.ref,
+    runId: run.run_id,
+    gitUrl: runnerConfig.git_url,
+  };
 
   try {
     for (const jobName of order) {
@@ -682,20 +495,7 @@ export async function runPipeline(
         continue;
       }
 
-      // Check if mode is allowed
-      if (jobDef.mode === "shell" && !runnerConfig.execution_modes.includes("shell")) {
-        await appendLogChunk(root, run.repo, run.run_id, `[mesh-ci] job "${jobName}" requires shell mode but "shell" is not in execution_modes\n`).catch(() => {});
-        run.jobs[jobName]!.status = "failed";
-        run.jobs[jobName]!.exit_code = 1;
-        failed.add(jobName);
-        await saveRun(root, run).catch((e) => {
-          console.warn(`[ci] run ${run.run_id}: saveRun failed: ${(e as Error).message}`);
-        });
-        continue;
-      }
-
-      // Best-effort: log I/O failures (disk full, fs error) must not abort a
-      // run. Log the failure to stderr so it surfaces in daemon output.
+      // Best-effort: log I/O failures must not abort a run.
       const onLog = async (line: string) => {
         await appendLogChunk(root, run.repo, run.run_id, line).catch((e) => {
           console.warn(`[ci] run ${run.run_id}: failed to write log chunk: ${(e as Error).message}`);
@@ -709,21 +509,13 @@ export async function runPipeline(
 
       let exitCode: number;
       try {
-        if (jobDef.mode === "shell") {
-          exitCode = await runShellJob(jobDef, {
-            worktree,
-            jobHome,
-            secrets: jobSecrets,
-            envPassthrough: runnerConfig.env_passthrough,
-            networkIsolation: runnerConfig.network_isolation,
-            jobsUid: runnerConfig.jobs_uid,
-            jobsGid: runnerConfig.jobs_gid,
-            meshVars: { sha: run.sha, ref: run.ref, runId: run.run_id },
-            onLog,
-          });
-        } else {
-          exitCode = await runDockerJob(jobDef, jobName, worktree, jobSecrets, onLog);
-        }
+        exitCode = await runDockerJob(jobDef, {
+          jobName,
+          worktree,
+          secrets: jobSecrets,
+          meshVars,
+          onLog,
+        });
       } catch (e) {
         await onLog(`[mesh-ci] job "${jobName}" threw: ${(e as Error).message}\n`);
         exitCode = 1;
@@ -741,16 +533,7 @@ export async function runPipeline(
       });
     }
   } finally {
-    await removeWorktree(
-      repoPath, worktree,
-      runnerConfig.jobs_uid || undefined, runnerConfig.jobs_gid || undefined,
-    ).catch(() => {});
-    if (jobHome && runnerConfig.jobs_uid) {
-      const rmHome = Bun.spawn<"ignore", "pipe", "pipe">(["rm", "-rf", jobHome], {
-        uid: runnerConfig.jobs_uid, gid: runnerConfig.jobs_gid, stdout: "pipe", stderr: "pipe",
-      } as unknown as Parameters<typeof Bun.spawn<"ignore", "pipe", "pipe">>[1]);
-      await rmHome.exited.catch(() => {});
-    }
+    await removeWorktree(repoPath, worktree).catch(() => {});
   }
 
   run.status = failed.size > 0 ? "failed" : "passed";

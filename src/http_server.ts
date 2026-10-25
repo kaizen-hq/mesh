@@ -677,31 +677,25 @@ async function handleGit(state: Daemon, req: Request, url: URL, server: any): Pr
     return textResponse(404, "no such mesh route");
   }
 
-  // git-receive-pack (push) is restricted to localhost.
-  // When the CI runner is enabled, a valid token is also required — either a
-  // per-run CI token (minted by the scheduler, injected only into jobs with
-  // push: true) or the node's long-lived direct-push token (for human pushes).
-  // When the runner is disabled there are no build steps that could sneak a
-  // push in, so the loopback check alone is sufficient.
+  // git-receive-pack (push) requires a valid token — either a per-run CI token
+  // (minted by the scheduler, injected into jobs with push: true) or the
+  // node's long-lived direct-push token (for human pushes via `mesh push-token`).
+  // The previous loopback IP restriction is removed: CI jobs now run inside
+  // containers whose outbound IP is the Docker bridge gateway, not loopback.
+  // The token is the sole authentication mechanism for pushes.
   if (service === "git-receive-pack") {
-    const remoteIp = server?.requestIP?.(req)?.address ?? "";
-    if (!isLoopback(remoteIp)) {
-      return textResponse(403, "git push is only permitted from localhost");
-    }
-    if (state.config.runner.enabled) {
-      const token = req.headers.get("x-mesh-run-token") ?? "";
-      ciRunId = token ? state.ci.consumePushToken(token) : null;
-      if (!ciRunId) {
-        const tokenHash = token ? await hashToken(token) : "";
-        if (!tokenHash || !state.directPushTokenHash || tokenHash !== state.directPushTokenHash) {
-          return textResponse(
-            403,
-            "git push requires a valid X-Mesh-Run-Token header — " +
-            "use `mesh push-token` to get the direct-push token, or add push: true to the CI job",
-          );
-        }
-        // Direct human push — ciRunId stays null; attributed to the node.
+    const token = req.headers.get("x-mesh-run-token") ?? "";
+    ciRunId = token ? state.ci.consumePushToken(token) : null;
+    if (!ciRunId) {
+      const tokenHash = token ? await hashToken(token) : "";
+      if (!tokenHash || !state.directPushTokenHash || tokenHash !== state.directPushTokenHash) {
+        return textResponse(
+          403,
+          "git push requires a valid X-Mesh-Run-Token header — " +
+          "use `mesh push-token` to get the direct-push token, or add push: true to the CI job",
+        );
       }
+      // Direct human push — ciRunId stays null; attributed to the node.
     }
   }
 
