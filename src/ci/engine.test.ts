@@ -435,50 +435,25 @@ services:
 // ---------- buildJobSecrets ----------
 
 describe("buildJobSecrets", () => {
-  it("returns run-level secrets when job has no push flag", () => {
-    const result = buildJobSecrets({ DB_URL: "postgres://..." }, makeJob(), "tok-123");
+  it("returns only secrets declared by the job", () => {
+    const result = buildJobSecrets({ DB_URL: "postgres://...", API_KEY: "secret" }, makeJob({ secrets: ["DB_URL"] }));
     expect(result["DB_URL"]).toBe("postgres://...");
-    expect(result["MESH_PUSH_TOKEN"]).toBeUndefined();
+    expect(result["API_KEY"]).toBeUndefined();
   });
 
-  it("does not inject MESH_PUSH_TOKEN when push is false", () => {
-    const result = buildJobSecrets({}, makeJob({ push: false }), "tok-123");
-    expect(result["MESH_PUSH_TOKEN"]).toBeUndefined();
+  it("returns empty object when job declares no secrets", () => {
+    const result = buildJobSecrets({ DB_URL: "postgres://..." }, makeJob({ secrets: [] }));
+    expect(Object.keys(result)).toHaveLength(0);
   });
 
-  it("does not inject MESH_PUSH_TOKEN when push is true but no token is provided", () => {
-    const result = buildJobSecrets({}, makeJob({ push: true }), undefined);
-    expect(result["MESH_PUSH_TOKEN"]).toBeUndefined();
+  it("omits secrets declared by job but absent from run-level secrets", () => {
+    const result = buildJobSecrets({}, makeJob({ secrets: ["MISSING_SECRET"] }));
+    expect(result["MISSING_SECRET"]).toBeUndefined();
   });
 
-  it("injects MESH_PUSH_TOKEN when push is true and a token is provided", () => {
-    const result = buildJobSecrets({}, makeJob({ push: true }), "tok-abc");
-    expect(result["MESH_PUSH_TOKEN"]).toBe("tok-abc");
-  });
-
-  it("includes both run-level secrets and MESH_PUSH_TOKEN for push: true jobs", () => {
-    const result = buildJobSecrets(
-      { API_KEY: "secret" },
-      makeJob({ push: true }),
-      "tok-xyz",
-    );
-    expect(result["API_KEY"]).toBe("secret");
-    expect(result["MESH_PUSH_TOKEN"]).toBe("tok-xyz");
-  });
-
-  it("does not mutate the original run-level secrets dict", () => {
+  it("does not mutate the run-level secrets dict", () => {
     const runSecrets = { A: "1" };
-    buildJobSecrets(runSecrets, makeJob({ push: true }), "tok");
-    expect(runSecrets["MESH_PUSH_TOKEN" as keyof typeof runSecrets]).toBeUndefined();
-  });
-
-  it("run-level secret named MESH_PUSH_TOKEN is overwritten for push: true jobs", () => {
-    // The injected token wins — a run-level secret with this name would be anomalous.
-    const result = buildJobSecrets(
-      { MESH_PUSH_TOKEN: "stale" },
-      makeJob({ push: true }),
-      "fresh-tok",
-    );
-    expect(result["MESH_PUSH_TOKEN"]).toBe("fresh-tok");
+    buildJobSecrets(runSecrets, makeJob({ secrets: ["A"] }));
+    expect(Object.keys(runSecrets)).toHaveLength(1);
   });
 });

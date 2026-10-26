@@ -217,66 +217,6 @@ describe("CiDomain capabilities", () => {
   });
 });
 
-// ---------- push tokens ----------
-
-describe("CiDomain push tokens", () => {
-  it("consumePushToken() returns null for an unknown token", () => {
-    expect(new CiDomain().consumePushToken("no-such-token")).toBeNull();
-  });
-
-  it("consumePushToken() returns null for an empty string", () => {
-    expect(new CiDomain().consumePushToken("")).toBeNull();
-  });
-
-  it("consumePushToken() returns the run_id after setPushToken()", () => {
-    const ci = new CiDomain();
-    ci.setPushToken("tok-abc", "run-1");
-    expect(ci.consumePushToken("tok-abc")).toBe("run-1");
-  });
-
-  it("consumePushToken() does not consume the token — repeated calls return the same run_id", () => {
-    const ci = new CiDomain();
-    ci.setPushToken("tok-abc", "run-1");
-    expect(ci.consumePushToken("tok-abc")).toBe("run-1");
-    expect(ci.consumePushToken("tok-abc")).toBe("run-1");
-  });
-
-  it("deletePushToken() removes the token so consumePushToken() returns null", () => {
-    const ci = new CiDomain();
-    ci.setPushToken("tok-abc", "run-1");
-    ci.deletePushToken("tok-abc");
-    expect(ci.consumePushToken("tok-abc")).toBeNull();
-  });
-
-  it("deletePushToken() is a no-op for an unknown token", () => {
-    const ci = new CiDomain();
-    expect(() => ci.deletePushToken("no-such-token")).not.toThrow();
-  });
-
-  it("different runs hold different tokens independently", () => {
-    const ci = new CiDomain();
-    ci.setPushToken("tok-1", "run-1");
-    ci.setPushToken("tok-2", "run-2");
-    expect(ci.consumePushToken("tok-1")).toBe("run-1");
-    expect(ci.consumePushToken("tok-2")).toBe("run-2");
-  });
-
-  it("deleting one run's token does not affect another run's token", () => {
-    const ci = new CiDomain();
-    ci.setPushToken("tok-1", "run-1");
-    ci.setPushToken("tok-2", "run-2");
-    ci.deletePushToken("tok-1");
-    expect(ci.consumePushToken("tok-1")).toBeNull();
-    expect(ci.consumePushToken("tok-2")).toBe("run-2");
-  });
-
-  it("overwriting a token with setPushToken() replaces the run_id", () => {
-    const ci = new CiDomain();
-    ci.setPushToken("tok-abc", "run-old");
-    ci.setPushToken("tok-abc", "run-new");
-    expect(ci.consumePushToken("tok-abc")).toBe("run-new");
-  });
-});
 
 // ---------- asCiState ----------
 

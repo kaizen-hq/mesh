@@ -22,8 +22,6 @@ export class CiDomain {
   private state: CiState = emptyCiState();
   private pendingAssignments: Map<string, PendingAssignment> = new Map();
   private _runningCount = 0;
-  // push token registry: token → run_id, valid for the lifetime of the run
-  private pushTokens: Map<string, string> = new Map();
   secrets: Record<string, string> = {};
   capabilities: NodeCapabilities | null = null;
 
@@ -60,21 +58,6 @@ export class CiDomain {
 
   deletePendingAssignment(runId: string): void {
     this.pendingAssignments.delete(runId);
-  }
-
-  // ---------- push tokens ----------
-
-  setPushToken(token: string, runId: string): void {
-    this.pushTokens.set(token, runId);
-  }
-
-  /** Returns the run_id associated with the token, or null if invalid. */
-  consumePushToken(token: string): string | null {
-    return this.pushTokens.get(token) ?? null;
-  }
-
-  deletePushToken(token: string): void {
-    this.pushTokens.delete(token);
   }
 
   // ---------- log buffers ----------

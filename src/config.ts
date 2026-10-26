@@ -36,28 +36,25 @@ const DEFAULT_PEER_PORT = 7979;
 
 export const DEFAULT_RUNNER: RunnerConfig = {
   enabled: true,
-  execution_modes: ["docker"],
   labels: [],
   max_concurrent_jobs: 2,
   workdir: path.join(os.tmpdir(), "mesh-ci-runs"),
   tools: [],
-  env_passthrough: [],
   log_stream_interval_ms: 500,
   max_worktree_age_minutes: 60,
   max_worktree_disk_mb: 2048,
   log_retention_runs: 50,
-  network_isolation: true,
-  jobs_uid: 0,
-  jobs_gid: 0,
+  buildkit_addr: "",
+  registry_url: "",
 };
 
 const KNOWN_TOP_LEVEL = new Set(["self", "peers", "transport", "runner"]);
 const KNOWN_SELF = new Set(["name", "peer_port"]);
 const KNOWN_TRANSPORT = new Set(["tls", "poll_secs"]);
 const KNOWN_RUNNER = new Set([
-  "enabled", "execution_modes", "labels", "max_concurrent_jobs",
-  "workdir", "tools", "env_passthrough", "log_stream_interval_ms", "max_worktree_age_minutes",
-  "max_worktree_disk_mb", "log_retention_runs", "network_isolation", "jobs_uid", "jobs_gid",
+  "enabled", "labels", "max_concurrent_jobs",
+  "workdir", "tools", "log_stream_interval_ms", "max_worktree_age_minutes",
+  "max_worktree_disk_mb", "log_retention_runs", "buildkit_addr", "registry_url",
 ]);
 const KNOWN_PEER = new Set(["name", "pubkey", "addresses", "address"]);
 
@@ -115,9 +112,6 @@ export async function loadConfig(file: string): Promise<Config> {
   warnUnknown(file, "runner", rr, KNOWN_RUNNER);
   const runner: RunnerConfig = {
     enabled: typeof rr.enabled === "boolean" ? rr.enabled : DEFAULT_RUNNER.enabled,
-    execution_modes: Array.isArray(rr.execution_modes)
-      ? (rr.execution_modes as unknown[]).filter((m): m is string => typeof m === "string")
-      : DEFAULT_RUNNER.execution_modes,
     labels: Array.isArray(rr.labels)
       ? (rr.labels as unknown[]).filter((l): l is string => typeof l === "string")
       : DEFAULT_RUNNER.labels,
@@ -127,9 +121,6 @@ export async function loadConfig(file: string): Promise<Config> {
     tools: Array.isArray(rr.tools)
       ? (rr.tools as unknown[]).filter((t): t is string => typeof t === "string")
       : DEFAULT_RUNNER.tools,
-    env_passthrough: Array.isArray(rr.env_passthrough)
-      ? (rr.env_passthrough as unknown[]).filter((v): v is string => typeof v === "string")
-      : DEFAULT_RUNNER.env_passthrough,
     log_stream_interval_ms:
       typeof rr.log_stream_interval_ms === "number" ? rr.log_stream_interval_ms : DEFAULT_RUNNER.log_stream_interval_ms,
     max_worktree_age_minutes:
@@ -138,10 +129,8 @@ export async function loadConfig(file: string): Promise<Config> {
       typeof rr.max_worktree_disk_mb === "number" ? rr.max_worktree_disk_mb : DEFAULT_RUNNER.max_worktree_disk_mb,
     log_retention_runs:
       typeof rr.log_retention_runs === "number" ? rr.log_retention_runs : DEFAULT_RUNNER.log_retention_runs,
-    network_isolation:
-      typeof rr.network_isolation === "boolean" ? rr.network_isolation : DEFAULT_RUNNER.network_isolation,
-    jobs_uid: typeof rr.jobs_uid === "number" ? rr.jobs_uid : DEFAULT_RUNNER.jobs_uid,
-    jobs_gid: typeof rr.jobs_gid === "number" ? rr.jobs_gid : DEFAULT_RUNNER.jobs_gid,
+    buildkit_addr: typeof rr.buildkit_addr === "string" ? rr.buildkit_addr : DEFAULT_RUNNER.buildkit_addr,
+    registry_url: typeof rr.registry_url === "string" ? rr.registry_url : DEFAULT_RUNNER.registry_url,
   };
 
   return {

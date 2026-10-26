@@ -21,7 +21,7 @@ import { runUpdate } from "./update.ts";
 import { loadSecretsConfig, detectTools, loadPipelineFromMirror } from "./ci/config.ts";
 import { checkCronSlots, type CronJobSpec } from "./ci/cron.ts";
 import { abandonStaleRuns } from "./ci/store.ts";
-import { generateDirectPushToken, loadDirectPushTokenHash } from "./push_token.ts";
+import { generateDirectPushToken } from "./push_token.ts";
 import pkg from "../package.json" with { type: "json" };
 
 // Source-paradigm commands need the mesh source tree on the real filesystem,
@@ -410,11 +410,6 @@ async function cmdStart(root: string, args: Args) {
   // Mark any runs left in "pending" or "running" from a previous daemon session as failed.
   await abandonStaleRuns(root);
 
-  // Load the direct push token hash (written by `mesh push-token`).
-  // Null means the user hasn't run `mesh push-token` yet; direct pushes will
-  // be blocked until they do. The plaintext is never stored on disk.
-  state.directPushTokenHash = await loadDirectPushTokenHash(root) ?? "";
-
   // Load secrets and detect capabilities from runner config in mesh.toml
   state.ci.secrets = await loadSecretsConfig(root);
   const tools = await detectTools(cfg.runner.tools.length > 0 ? cfg.runner.tools : undefined);
@@ -426,25 +421,6 @@ async function cmdStart(root: string, args: Args) {
     runner: cfg.runner.enabled,
     load: { jobs_running: 0, cpu_percent: 0, mem_free_mb: 0 },
   };
-
-  // Probe whether shell network isolation is usable on this host.
-  // unshare --net requires Linux and unprivileged user namespaces to be enabled
-  // (kernel.unprivileged_userns_clone=1 on some distros, CAP_SYS_ADMIN otherwise).
-  // If unavailable, auto-disable network_isolation so shell jobs don't fail.
-  // The push token is the primary control; this is defence-in-depth only.
-  if (process.platform === "linux" && cfg.runner.execution_modes.includes("shell") && cfg.runner.network_isolation) {
-    const probe = Bun.spawn(["unshare", "--net", "true"], { stdout: "ignore", stderr: "ignore" });
-    await probe.exited;
-    if (probe.exitCode !== 0) {
-      cfg.runner.network_isolation = false;
-      console.warn(
-        "[runner] network_isolation disabled: unshare --net is not available on this host " +
-        "(unprivileged user namespaces blocked). Shell jobs will run with host network access. " +
-        "The push token remains the authoritative control. " +
-        "To suppress this warning, set network_isolation = false in mesh.toml [runner].",
-      );
-    }
-  }
 
   const listen = (args.flags["listen"] as string) || "0.0.0.0:7979";
   const heartbeatSecs = Number(args.flags["heartbeat-secs"] ?? 15);

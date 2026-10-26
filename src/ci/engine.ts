@@ -1,9 +1,11 @@
 // Job execution: worktree setup, Docker runner, job DAG.
 
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import type { Pipeline, JobDefinition, PipelineRun, JobRun, RunnerConfig } from "./types.ts";
 import { appendLogChunk, saveRun } from "./store.ts";
+import { matchesBranch } from "./scheduler.ts";
 
 
 // ---------- DAG types ----------
@@ -243,17 +245,15 @@ export function validateComposeFile(content: string, jobName: string): void {
 }
 
 /**
- * Merges run-level secrets with job-level overrides. Injects MESH_PUSH_TOKEN
- * only when the job declares push: true and a token is available.
+ * Filters run-level secrets to only those declared by the job.
  */
 export function buildJobSecrets(
   runSecrets: Record<string, string>,
   job: JobDefinition,
-  pushToken?: string,
 ): Record<string, string> {
-  const jobSecrets: Record<string, string> = { ...runSecrets };
-  if (job.push && pushToken) {
-    jobSecrets["MESH_PUSH_TOKEN"] = pushToken;
+  const jobSecrets: Record<string, string> = {};
+  for (const s of job.secrets) {
+    if (runSecrets[s] !== undefined) jobSecrets[s] = runSecrets[s]!;
   }
   return jobSecrets;
 }
@@ -265,7 +265,7 @@ interface DockerJobOpts {
   worktree: string;
   secrets: Record<string, string>;
   // Mesh-provided variables injected into every container.
-  meshVars: { sha: string; ref: string; runId: string; gitUrl: string };
+  meshVars: { sha: string; ref: string; runId: string };
   onLog: (line: string) => Promise<void>;
 }
 
@@ -278,19 +278,10 @@ async function runDockerJob(job: JobDefinition, opts: DockerJobOpts): Promise<nu
     "--env", `MESH_REF=${meshVars.ref}`,
     "--env", `MESH_RUN_ID=${meshVars.runId}`,
   ];
-  if (meshVars.gitUrl) {
-    meshEnvArgs.push("--env", `MESH_GIT_URL=${meshVars.gitUrl}`);
-  }
-  // Push token: only for jobs with push: true (already in secrets via buildJobSecrets).
-  const pushToken = secrets["MESH_PUSH_TOKEN"];
-  if (pushToken) {
-    meshEnvArgs.push("--env", `MESH_PUSH_TOKEN=${pushToken}`);
-  }
 
   // User-declared secrets (from secrets.yml, filtered to what this job listed).
   const envArgs: string[] = [];
   for (const s of job.secrets) {
-    if (s === "MESH_PUSH_TOKEN") continue; // injected via meshEnvArgs above
     const val = secrets[s];
     if (val !== undefined) envArgs.push("--env", `${s}=${val}`);
   }
@@ -421,13 +412,155 @@ export async function removeWorktree(
 
 // ---------- pipeline runner ----------
 
+// ---------- built-in job: uses: image ----------
+
+/**
+ * Builds and pushes a container image via buildkitd, returns the full image
+ * reference including digest (e.g. "registry.local:5000/repo@sha256:abc...").
+ */
+export async function runImageJob(
+  jobDef: JobDefinition,
+  opts: {
+    jobName: string;
+    worktree: string;
+    runnerConfig: RunnerConfig;
+    repoName: string;
+    sha: string;
+    onLog: (line: string) => Promise<void>;
+  },
+): Promise<string> {
+  const { jobName, worktree, runnerConfig, repoName, sha, onLog } = opts;
+  if (!runnerConfig.buildkit_addr) {
+    throw new Error(`job "${jobName}" (uses: image): runner.buildkit_addr is not configured`);
+  }
+  if (!runnerConfig.registry_url) {
+    throw new Error(`job "${jobName}" (uses: image): runner.registry_url is not configured`);
+  }
+
+  const context = jobDef.with?.["context"] ?? ".";
+  const dockerfile = jobDef.with?.["dockerfile"] ?? "Dockerfile";
+  const imageTag = `${runnerConfig.registry_url}/${repoName}:${sha}`;
+  const metaFile = path.join(os.tmpdir(), `mesh-ci-meta-${crypto.randomUUID()}.json`);
+
+  try {
+    const args = [
+      "buildx", "build",
+      "--push",
+      "--metadata-file", metaFile,
+      "--file", path.join(worktree, context, dockerfile),
+      "--tag", imageTag,
+      path.join(worktree, context),
+    ];
+    const env: Record<string, string> = {
+      ...buildDockerEnv({}),
+      BUILDKIT_HOST: runnerConfig.buildkit_addr,
+    };
+    const { exitCode } = await spawnAndLog("docker", args, { env }, {}, onLog);
+    if (exitCode !== 0) {
+      throw new Error(`job "${jobName}" (uses: image): docker buildx build exited ${exitCode}`);
+    }
+
+    // Extract digest from the buildx metadata JSON.
+    const metaRaw = await fs.readFile(metaFile, "utf8").catch(() => "{}");
+    const meta = JSON.parse(metaRaw) as Record<string, unknown>;
+    const digest = (meta["containerimage.digest"] ?? meta["image.digest"] ?? "") as string;
+    if (!digest.startsWith("sha256:")) {
+      throw new Error(`job "${jobName}" (uses: image): could not read image digest from metadata`);
+    }
+    return `${runnerConfig.registry_url}/${repoName}@${digest}`;
+  } finally {
+    await fs.unlink(metaFile).catch(() => {});
+  }
+}
+
+// ---------- built-in job: uses: gitops ----------
+
+/**
+ * Patches a gitops bare repo on disk with a new image reference.
+ * Reads the image ref from run.artifacts[with.image], clones the bare repo
+ * via file://, patches the manifest, commits, and pushes back.
+ */
+export async function runGitopsJob(
+  jobDef: JobDefinition,
+  opts: {
+    jobName: string;
+    root: string;
+    gitopsRepo: string;
+    imageRef: string;
+    onLog: (line: string) => Promise<void>;
+  },
+): Promise<void> {
+  const { jobName, root, gitopsRepo, imageRef, onLog } = opts;
+  const manifestPath = jobDef.with?.["manifest"];
+  const imagePattern = jobDef.with?.["image_pattern"];
+  if (!manifestPath) {
+    throw new Error(`job "${jobName}" (uses: gitops): with.manifest is required`);
+  }
+  if (!imagePattern) {
+    throw new Error(`job "${jobName}" (uses: gitops): with.image_pattern is required`);
+  }
+
+  const bareRepoPath = path.join(root, "repos", `${gitopsRepo}.git`);
+  const cloneDir = path.join(os.tmpdir(), `mesh-ci-gitops-${crypto.randomUUID()}`);
+
+  try {
+    // Clone the bare repo locally via file:// (no HTTP, no token needed).
+    const cloneResult = Bun.spawnSync(["git", "clone", `file://${bareRepoPath}`, cloneDir], {
+      stdout: "pipe", stderr: "pipe",
+    });
+    if (cloneResult.exitCode !== 0) {
+      throw new Error(
+        `job "${jobName}" (uses: gitops): git clone failed: ${new TextDecoder().decode(cloneResult.stderr).trim()}`,
+      );
+    }
+
+    const fullManifestPath = path.join(cloneDir, manifestPath);
+    const content = await fs.readFile(fullManifestPath, "utf8").catch((e) => {
+      throw new Error(`job "${jobName}" (uses: gitops): cannot read manifest ${manifestPath}: ${(e as Error).message}`);
+    });
+
+    // Replace occurrences of `<imagePattern>[@:]...` with `<imageRef>`.
+    const escaped = imagePattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const regex = new RegExp(`${escaped}(?:@sha256:[a-f0-9]+|:[^\\s"']+)`, "g");
+    const patched = content.replace(regex, imageRef);
+    if (patched === content) {
+      await onLog(`[mesh-ci] warning: image pattern "${imagePattern}" not found in ${manifestPath}, manifest unchanged\n`);
+    }
+    await fs.writeFile(fullManifestPath, patched, "utf8");
+
+    const gitEnv = { GIT_AUTHOR_NAME: "mesh-ci", GIT_AUTHOR_EMAIL: "mesh-ci@localhost",
+      GIT_COMMITTER_NAME: "mesh-ci", GIT_COMMITTER_EMAIL: "mesh-ci@localhost",
+      PATH: process.env["PATH"] ?? "" };
+
+    const addResult = Bun.spawnSync(["git", "add", manifestPath], { cwd: cloneDir, env: gitEnv, stdout: "pipe", stderr: "pipe" });
+    if (addResult.exitCode !== 0) throw new Error(`job "${jobName}" (uses: gitops): git add failed`);
+
+    const commitResult = Bun.spawnSync(
+      ["git", "commit", "--allow-empty", "-m", `ci: update ${imagePattern} to ${imageRef}`],
+      { cwd: cloneDir, env: gitEnv, stdout: "pipe", stderr: "pipe" },
+    );
+    if (commitResult.exitCode !== 0) throw new Error(`job "${jobName}" (uses: gitops): git commit failed`);
+
+    const pushResult = Bun.spawnSync(["git", "push", "origin", "main"],
+      { cwd: cloneDir, env: gitEnv, stdout: "pipe", stderr: "pipe" });
+    if (pushResult.exitCode !== 0) {
+      throw new Error(
+        `job "${jobName}" (uses: gitops): git push failed: ${new TextDecoder().decode(pushResult.stderr).trim()}`,
+      );
+    }
+    await onLog(`[mesh-ci] gitops: updated ${manifestPath} → ${imageRef}\n`);
+  } finally {
+    await fs.rm(cloneDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+// ---------- pipeline runner ----------
+
 export interface RunPipelineOptions {
   root: string;
   repoPath: string;
   runnerConfig: RunnerConfig;
   secrets: Record<string, string>;
-  // When set, injected as MESH_PUSH_TOKEN into jobs that declare push: true.
-  pushToken?: string;
   onLog?: (runId: string, jobName: string, line: string) => Promise<void>;
   onRunUpdate?: (run: PipelineRun) => Promise<void>;
 }
@@ -465,7 +598,6 @@ export async function runPipeline(
     sha: run.sha,
     ref: run.ref,
     runId: run.run_id,
-    gitUrl: runnerConfig.git_url,
   };
 
   try {
@@ -485,16 +617,6 @@ export async function runPipeline(
         console.warn(`[ci] run ${run.run_id}: onRunUpdate failed: ${(e as Error).message}`);
       });
 
-      // Skip if any dependency failed
-      const skipped = collectSkipped(dag, failed);
-      if (skipped.has(jobName)) {
-        run.jobs[jobName]!.status = "skipped";
-        await saveRun(root, run).catch((e) => {
-          console.warn(`[ci] run ${run.run_id}: saveRun failed: ${(e as Error).message}`);
-        });
-        continue;
-      }
-
       // Best-effort: log I/O failures must not abort a run.
       const onLog = async (line: string) => {
         await appendLogChunk(root, run.repo, run.run_id, line).catch((e) => {
@@ -505,17 +627,68 @@ export async function runPipeline(
         });
       };
 
-      const jobSecrets = buildJobSecrets(secrets, jobDef, opts.pushToken);
+      // Skip if any dependency failed
+      const skipped = collectSkipped(dag, failed);
+      if (skipped.has(jobName)) {
+        run.jobs[jobName]!.status = "skipped";
+        await saveRun(root, run).catch((e) => {
+          console.warn(`[ci] run ${run.run_id}: saveRun failed: ${(e as Error).message}`);
+        });
+        continue;
+      }
+
+      // Job-level on: filter — skip if the trigger doesn't match the job's branch filter.
+      if (jobDef.on?.push?.branches) {
+        if (run.triggered_by.type !== "push") {
+          await onLog(`[mesh-ci] job "${jobName}" skipped: job requires push trigger but run was triggered by ${run.triggered_by.type}\n`);
+          run.jobs[jobName]!.status = "skipped";
+          await saveRun(root, run).catch((e) => {
+            console.warn(`[ci] run ${run.run_id}: saveRun failed: ${(e as Error).message}`);
+          });
+          continue;
+        }
+        if (!matchesBranch(run.ref, jobDef.on.push.branches)) {
+          await onLog(`[mesh-ci] job "${jobName}" skipped: ref ${run.ref} does not match job on.push.branches filter\n`);
+          run.jobs[jobName]!.status = "skipped";
+          await saveRun(root, run).catch((e) => {
+            console.warn(`[ci] run ${run.run_id}: saveRun failed: ${(e as Error).message}`);
+          });
+          continue;
+        }
+      }
+
+      const jobSecrets = buildJobSecrets(secrets, jobDef);
 
       let exitCode: number;
       try {
-        exitCode = await runDockerJob(jobDef, {
-          jobName,
-          worktree,
-          secrets: jobSecrets,
-          meshVars,
-          onLog,
-        });
+        if (jobDef.uses === "image") {
+          const imageRef = await runImageJob(jobDef, {
+            jobName,
+            worktree,
+            runnerConfig,
+            repoName: run.repo,
+            sha: run.sha,
+            onLog,
+          });
+          run.artifacts[jobName] = imageRef;
+          exitCode = 0;
+        } else if (jobDef.uses === "gitops") {
+          const imageJobName = jobDef.with?.["image"];
+          if (!imageJobName) throw new Error(`job "${jobName}" (uses: gitops): with.image is required`);
+          const imageRef = run.artifacts[imageJobName];
+          if (!imageRef) throw new Error(`job "${jobName}" (uses: gitops): artifact "${imageJobName}" not found — ensure the image job ran first`);
+          const gitopsRepo = jobDef.with?.["repo"] ?? run.repo;
+          await runGitopsJob(jobDef, { jobName, root, gitopsRepo, imageRef, onLog });
+          exitCode = 0;
+        } else {
+          exitCode = await runDockerJob(jobDef, {
+            jobName,
+            worktree,
+            secrets: jobSecrets,
+            meshVars,
+            onLog,
+          });
+        }
       } catch (e) {
         await onLog(`[mesh-ci] job "${jobName}" threw: ${(e as Error).message}\n`);
         exitCode = 1;

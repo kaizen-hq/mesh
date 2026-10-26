@@ -43,7 +43,7 @@ export interface ControlCtx {
   listenAddr: string | null;
   signalShutdown(): void;
   notifyStatusChanged(): void;
-  notifyCiRunChanged(repo: string): void;
+  notifyCiRunChanged(repo: string, runner: string, status: string): void;
   recordPeerAddress(peer: string, address: string): Promise<boolean>;
   broadcastRepoDeletion(repo: string, deleted_at: string): void;
   savePendingInvites(): Promise<void>;
@@ -388,7 +388,7 @@ async function dispatch(state: ControlCtx, req: ControlRequest): Promise<Control
       if (!run) return { type: "error", message: `run ${runId} not found` };
       run.status = "cancelled";
       run.completed_at = new Date().toISOString();
-      state.notifyCiRunChanged(run.repo);
+      state.notifyCiRunChanged(run.repo, run.runner, "cancelled");
       return { type: "ok" };
     }
     case "ci_runners": {

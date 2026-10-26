@@ -20,7 +20,7 @@ export interface PeerLinkCtx {
   ci: CiDomain;
   notifyStatusChanged(): void;
   notifyIssueChanged(repo: string): void;
-  notifyCiRunChanged(repo: string): void;
+  notifyCiRunChanged(repo: string, runner: string, status: string): void;
   recordPeerAddress(peer: string, address: string): Promise<boolean>;
 }
 import { normalizePeerUrl } from "./config.ts";
@@ -234,7 +234,7 @@ function handleCiRunUpdate(state: PeerLinkCtx, msg: import("./proto.ts").CiMessa
         run.status = "running";
         run.runner = msg.runner;
         void saveRun(state.root, run);
-        state.notifyCiRunChanged(msg.repo);
+        state.notifyCiRunChanged(msg.repo, msg.runner, "running");
       }
       break;
     }
@@ -244,7 +244,7 @@ function handleCiRunUpdate(state: PeerLinkCtx, msg: import("./proto.ts").CiMessa
         run.status = msg.status;
         run.completed_at = new Date().toISOString();
         void saveRun(state.root, run);
-        state.notifyCiRunChanged(msg.repo);
+        state.notifyCiRunChanged(msg.repo, run.runner, msg.status);
       }
       break;
     }

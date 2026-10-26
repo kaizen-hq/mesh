@@ -21,15 +21,21 @@ export interface RunnerRequirements {
 }
 
 export interface JobDefinition {
+  // Container job: run commands inside a Docker image.
   image?: string;
+  // Compose job: run a service in a docker-compose file.
   compose?: string;
   service?: string;
   commands: string[];
   depends_on: string[];
   secrets: string[];
-  // Set to true to allow this job to push to the mesh daemon's git endpoint.
-  // The runner injects MESH_PUSH_TOKEN and MESH_GIT_URL into the container.
-  push?: boolean;
+  // Built-in job type. Supported values: "image", "gitops".
+  uses?: string;
+  // Parameters for a built-in job (uses:).
+  with?: Record<string, string>;
+  // Job-level trigger filter. When set, the job is skipped unless the
+  // pipeline trigger matches (e.g. only run on push to main, not manual).
+  on?: { push?: { branches: string[] } };
 }
 
 // ---------- runtime run state ----------
@@ -45,6 +51,10 @@ export interface PipelineRun {
   started_at: string;
   completed_at?: string;
   jobs: Record<string, JobRun>;
+  // Outputs from built-in image jobs: jobName → full image reference
+  // (e.g. "registry.local:5000/chat-web@sha256:abc123...").
+  // Consumed by downstream gitops jobs.
+  artifacts: Record<string, string>;
 }
 
 export type RunStatus = "pending" | "running" | "passed" | "failed" | "cancelled";
@@ -122,12 +132,14 @@ export interface RunnerConfig {
   max_worktree_age_minutes: number;
   max_worktree_disk_mb: number;
   log_retention_runs: number;
-  // Address of this daemon's git endpoint, injected into every job container
-  // as MESH_GIT_URL so jobs can push to mesh-gitops without hardcoding
-  // localhost (which is unreachable from inside a container).
-  // Example: "https://host.docker.internal:7979" on Docker Desktop,
-  //          "https://mesh-ci-runner.ci.svc.cluster.local:7979" in k3s.
-  git_url: string;
+  // Address of the buildkitd service for uses: image jobs.
+  // Example: "tcp://buildkitd.ci.svc.cluster.local:1234"
+  // When empty, uses: image jobs will fail with a clear error.
+  buildkit_addr: string;
+  // URL of the container registry for uses: image jobs.
+  // Example: "registry.local:5000"
+  // When empty, uses: image jobs will fail with a clear error.
+  registry_url: string;
 }
 
 export function emptyCiState(): CiState {

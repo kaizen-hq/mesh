@@ -55,6 +55,21 @@ export function parsePipeline(src: string): Pipeline {
       );
     }
 
+    // Parse job-level on: filter.
+    let jobOn: JobDefinition["on"] | undefined;
+    const jobOnSec = raw.on as Record<string, unknown> | undefined;
+    const jobOnPushSec = jobOnSec?.push as Record<string, unknown> | undefined;
+    if (Array.isArray(jobOnPushSec?.branches)) {
+      jobOn = { push: { branches: (jobOnPushSec.branches as unknown[]).map(String) } };
+    }
+
+    // Parse uses: and with: for built-in job types.
+    const uses = typeof raw.uses === "string" ? raw.uses : undefined;
+    const withRaw = raw.with as Record<string, unknown> | undefined;
+    const withParams: Record<string, string> | undefined = withRaw != null
+      ? Object.fromEntries(Object.entries(withRaw).map(([k, v]) => [k, String(v)]))
+      : undefined;
+
     jobs[jobName] = {
       image: typeof raw.image === "string" ? raw.image : undefined,
       compose: typeof raw.compose === "string" ? raw.compose : undefined,
@@ -62,7 +77,9 @@ export function parsePipeline(src: string): Pipeline {
       commands,
       depends_on,
       secrets,
-      push: raw.push === true,
+      uses,
+      with: withParams,
+      on: jobOn,
     };
   }
 
