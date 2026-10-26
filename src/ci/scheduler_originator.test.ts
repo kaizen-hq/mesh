@@ -109,7 +109,9 @@ async function makeCtx(root: string): Promise<SchedulerCtx> {
         max_worktree_age_minutes: 60,
         max_worktree_disk_mb: 2048,
         log_retention_runs: 50,
-        git_url: "",
+        buildkit_addr: "",
+        registry_url: "",
+        buildx_builder: "ci-builder",
       },
       transport: { tls: false, poll_secs: 30 },
       peers: [],
@@ -119,7 +121,12 @@ async function makeCtx(root: string): Promise<SchedulerCtx> {
     identity: { privateKey: seed, publicKey, pubkeyString: `ed25519:test`, certPem: null, keyPem: null },
     peers: fakePeers as unknown as SchedulerCtx["peers"],
     repos: fakeRepos as unknown as SchedulerCtx["repos"],
+    repoLocks: new Map(),
+    outbound: { enqueue: () => {} } as unknown as SchedulerCtx["outbound"],
+    notifyStatusChanged: () => {},
+    notifyIssueChanged: () => {},
     notifyCiRunChanged: () => {},
+    recordPeerAddress: async () => false,
   };
 }
 

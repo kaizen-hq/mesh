@@ -140,6 +140,11 @@ export interface RunnerConfig {
   // Example: "registry.local:5000"
   // When empty, uses: image jobs will fail with a clear error.
   registry_url: string;
+  // Name of the docker buildx builder configured by the runner entrypoint.
+  // Passed as --builder on every `docker buildx build` invocation so the
+  // correct remote builder (pointing at buildkit_addr) is always selected.
+  // Default: "ci-builder" (matches the name written by entrypoint.sh).
+  buildx_builder: string;
 }
 
 export function emptyCiState(): CiState {

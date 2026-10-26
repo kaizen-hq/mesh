@@ -5,6 +5,8 @@ import type { CiDomain } from "./ci_domain.ts";
 import type { PeerRegistry } from "../peer_registry.ts";
 import type { RepoRegistry } from "../repo_registry.ts";
 import type { Identity } from "../identity.ts";
+import type { RepoLockMap } from "../repo_store.ts";
+import type { OutboundQueues } from "../outbound_queues.ts";
 
 export interface SchedulerCtx {
   config: Config;
@@ -13,9 +15,15 @@ export interface SchedulerCtx {
   ci: CiDomain;
   peers: PeerRegistry;
   repos: RepoRegistry;
+  repoLocks: RepoLockMap;
+  outbound: OutboundQueues;
+  notifyStatusChanged(): void;
+  notifyIssueChanged(repo: string): void;
   notifyCiRunChanged(repo: string, runner: string, status: string): void;
+  recordPeerAddress(peer: string, address: string): Promise<boolean>;
 }
 import type { Pipeline, PipelineRun, TriggerKind, RunnerRequirements } from "./types.ts";
+import { broadcastRefUpdate } from "../peer_link.ts";
 import type { CiMessage } from "../proto.ts";
 import { signFrame } from "../proto.ts";
 import { loadPipelineFromMirror } from "./config.ts";
@@ -437,6 +445,11 @@ async function runLocalPipeline(state: SchedulerCtx, pipeline: Pipeline, run: Pi
     onRunUpdate: async (updated) => {
       state.ci.setRun(updated);
       state.notifyCiRunChanged(updated.repo, updated.runner, updated.status);
+    },
+    onRefUpdated: (repo, ref, newSha, oldSha) => {
+      // Notify peers of the gitops repo ref update immediately so the controller
+      // doesn't have to wait for its next periodic fetch cycle.
+      broadcastRefUpdate(state, repo, [{ name: ref, old_sha: oldSha, new_sha: newSha }], null, false);
     },
   });
 

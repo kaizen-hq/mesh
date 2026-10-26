@@ -442,19 +442,42 @@ export async function runImageJob(
   const imageTag = `${runnerConfig.registry_url}/${repoName}:${sha}`;
   const metaFile = path.join(os.tmpdir(), `mesh-ci-meta-${crypto.randomUUID()}.json`);
 
+  const builderArgs = runnerConfig.buildx_builder ? ["--builder", runnerConfig.buildx_builder] : [];
+  const env: Record<string, string> = {
+    ...buildDockerEnv({}),
+    BUILDKIT_HOST: runnerConfig.buildkit_addr,
+    ...(runnerConfig.buildx_builder ? { BUILDX_BUILDER: runnerConfig.buildx_builder } : {}),
+  };
+
   try {
+    // If with.test_target is set, build that stage first (no push).
+    // This runs RUN steps (e.g. test suites) that the final stage may not depend on.
+    // The job fails immediately if the test stage exits non-zero.
+    const testTarget = jobDef.with?.["test_target"];
+    if (testTarget) {
+      const testArgs = [
+        "buildx", "build",
+        ...builderArgs,
+        "--target", testTarget,
+        "--output", "type=cacheonly",
+        "--file", path.join(worktree, context, dockerfile),
+        path.join(worktree, context),
+      ];
+      const { exitCode: testExit } = await spawnAndLog("docker", testArgs, { env }, {}, onLog);
+      if (testExit !== 0) {
+        throw new Error(`job "${jobName}" (uses: image): test stage "${testTarget}" failed (exit ${testExit})`);
+      }
+    }
+
     const args = [
       "buildx", "build",
+      ...builderArgs,
       "--push",
       "--metadata-file", metaFile,
       "--file", path.join(worktree, context, dockerfile),
       "--tag", imageTag,
       path.join(worktree, context),
     ];
-    const env: Record<string, string> = {
-      ...buildDockerEnv({}),
-      BUILDKIT_HOST: runnerConfig.buildkit_addr,
-    };
     const { exitCode } = await spawnAndLog("docker", args, { env }, {}, onLog);
     if (exitCode !== 0) {
       throw new Error(`job "${jobName}" (uses: image): docker buildx build exited ${exitCode}`);
@@ -488,9 +511,10 @@ export async function runGitopsJob(
     gitopsRepo: string;
     imageRef: string;
     onLog: (line: string) => Promise<void>;
+    onRefUpdated?: (repo: string, ref: string, newSha: string, oldSha: string) => void;
   },
 ): Promise<void> {
-  const { jobName, root, gitopsRepo, imageRef, onLog } = opts;
+  const { jobName, root, gitopsRepo, imageRef, onLog, onRefUpdated } = opts;
   const manifestPath = jobDef.with?.["manifest"];
   const imagePattern = jobDef.with?.["image_pattern"];
   if (!manifestPath) {
@@ -502,6 +526,7 @@ export async function runGitopsJob(
 
   const bareRepoPath = path.join(root, "repos", `${gitopsRepo}.git`);
   const cloneDir = path.join(os.tmpdir(), `mesh-ci-gitops-${crypto.randomUUID()}`);
+  const dec = new TextDecoder();
 
   try {
     // Clone the bare repo locally via file:// (no HTTP, no token needed).
@@ -510,7 +535,7 @@ export async function runGitopsJob(
     });
     if (cloneResult.exitCode !== 0) {
       throw new Error(
-        `job "${jobName}" (uses: gitops): git clone failed: ${new TextDecoder().decode(cloneResult.stderr).trim()}`,
+        `job "${jobName}" (uses: gitops): git clone failed: ${dec.decode(cloneResult.stderr).trim()}`,
       );
     }
 
@@ -524,31 +549,65 @@ export async function runGitopsJob(
     const regex = new RegExp(`${escaped}(?:@sha256:[a-f0-9]+|:[^\\s"']+)`, "g");
     const patched = content.replace(regex, imageRef);
     if (patched === content) {
-      await onLog(`[mesh-ci] warning: image pattern "${imagePattern}" not found in ${manifestPath}, manifest unchanged\n`);
+      // Pattern not found — fail rather than silently committing a no-op.
+      // A typo in image_pattern should surface as a job failure, not a
+      // successful deploy that changed nothing.
+      throw new Error(
+        `job "${jobName}" (uses: gitops): image_pattern "${imagePattern}" not found in ${manifestPath} — check the pattern matches the image reference in the manifest`,
+      );
     }
     await fs.writeFile(fullManifestPath, patched, "utf8");
 
-    const gitEnv = { GIT_AUTHOR_NAME: "mesh-ci", GIT_AUTHOR_EMAIL: "mesh-ci@localhost",
+    const gitEnv = {
+      GIT_AUTHOR_NAME: "mesh-ci", GIT_AUTHOR_EMAIL: "mesh-ci@localhost",
       GIT_COMMITTER_NAME: "mesh-ci", GIT_COMMITTER_EMAIL: "mesh-ci@localhost",
-      PATH: process.env["PATH"] ?? "" };
+      PATH: process.env["PATH"] ?? "",
+    };
+
+    // Capture the old HEAD sha before the commit for the ref-update broadcast.
+    const oldShaResult = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: cloneDir, env: gitEnv, stdout: "pipe", stderr: "pipe" });
+    const oldSha = oldShaResult.exitCode === 0 ? dec.decode(oldShaResult.stdout).trim() : "0000000000000000000000000000000000000000";
 
     const addResult = Bun.spawnSync(["git", "add", manifestPath], { cwd: cloneDir, env: gitEnv, stdout: "pipe", stderr: "pipe" });
     if (addResult.exitCode !== 0) throw new Error(`job "${jobName}" (uses: gitops): git add failed`);
 
     const commitResult = Bun.spawnSync(
-      ["git", "commit", "--allow-empty", "-m", `ci: update ${imagePattern} to ${imageRef}`],
+      ["git", "commit", "-m", `ci: update ${imagePattern} to ${imageRef}`],
       { cwd: cloneDir, env: gitEnv, stdout: "pipe", stderr: "pipe" },
     );
     if (commitResult.exitCode !== 0) throw new Error(`job "${jobName}" (uses: gitops): git commit failed`);
 
-    const pushResult = Bun.spawnSync(["git", "push", "origin", "main"],
-      { cwd: cloneDir, env: gitEnv, stdout: "pipe", stderr: "pipe" });
-    if (pushResult.exitCode !== 0) {
-      throw new Error(
-        `job "${jobName}" (uses: gitops): git push failed: ${new TextDecoder().decode(pushResult.stderr).trim()}`,
-      );
+    // Push with retry + rebase. Two deploys running concurrently will both try
+    // to push to the same branch; the loser needs to rebase and retry.
+    const MAX_PUSH_ATTEMPTS = 3;
+    let pushed = false;
+    for (let attempt = 1; attempt <= MAX_PUSH_ATTEMPTS; attempt++) {
+      const pushResult = Bun.spawnSync(["git", "push", "origin", "main"],
+        { cwd: cloneDir, env: gitEnv, stdout: "pipe", stderr: "pipe" });
+      if (pushResult.exitCode === 0) { pushed = true; break; }
+
+      if (attempt < MAX_PUSH_ATTEMPTS) {
+        await onLog(`[mesh-ci] gitops: push attempt ${attempt} failed, rebasing on origin/main and retrying...\n`);
+        const fetchResult = Bun.spawnSync(["git", "fetch", "origin", "main"], { cwd: cloneDir, env: gitEnv, stdout: "pipe", stderr: "pipe" });
+        if (fetchResult.exitCode !== 0) throw new Error(`job "${jobName}" (uses: gitops): git fetch failed before rebase`);
+        const rebaseResult = Bun.spawnSync(["git", "rebase", "origin/main"], { cwd: cloneDir, env: gitEnv, stdout: "pipe", stderr: "pipe" });
+        if (rebaseResult.exitCode !== 0) {
+          Bun.spawnSync(["git", "rebase", "--abort"], { cwd: cloneDir, env: gitEnv, stdout: "pipe", stderr: "pipe" });
+          throw new Error(`job "${jobName}" (uses: gitops): rebase conflict after push failure — deploy aborted to avoid data loss`);
+        }
+      } else {
+        throw new Error(
+          `job "${jobName}" (uses: gitops): git push failed after ${MAX_PUSH_ATTEMPTS} attempts: ${dec.decode(pushResult.stderr).trim()}`,
+        );
+      }
     }
-    await onLog(`[mesh-ci] gitops: updated ${manifestPath} → ${imageRef}\n`);
+
+    if (pushed) {
+      const newShaResult = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: cloneDir, env: gitEnv, stdout: "pipe", stderr: "pipe" });
+      const newSha = newShaResult.exitCode === 0 ? dec.decode(newShaResult.stdout).trim() : "";
+      await onLog(`[mesh-ci] gitops: updated ${manifestPath} → ${imageRef}\n`);
+      if (newSha) onRefUpdated?.(gitopsRepo, "refs/heads/main", newSha, oldSha);
+    }
   } finally {
     await fs.rm(cloneDir, { recursive: true, force: true }).catch(() => {});
   }
@@ -563,6 +622,9 @@ export interface RunPipelineOptions {
   secrets: Record<string, string>;
   onLog?: (runId: string, jobName: string, line: string) => Promise<void>;
   onRunUpdate?: (run: PipelineRun) => Promise<void>;
+  // Called after a successful uses: gitops push so peers can be notified
+  // of the updated ref immediately rather than waiting for the next periodic fetch.
+  onRefUpdated?: (repo: string, ref: string, newSha: string, oldSha: string) => void;
 }
 
 export async function runPipeline(
@@ -678,8 +740,18 @@ export async function runPipeline(
           const imageRef = run.artifacts[imageJobName];
           if (!imageRef) throw new Error(`job "${jobName}" (uses: gitops): artifact "${imageJobName}" not found — ensure the image job ran first`);
           const gitopsRepo = jobDef.with?.["repo"] ?? run.repo;
-          await runGitopsJob(jobDef, { jobName, root, gitopsRepo, imageRef, onLog });
+          await runGitopsJob(jobDef, { jobName, root, gitopsRepo, imageRef, onLog, onRefUpdated: opts.onRefUpdated });
           exitCode = 0;
+        } else if (jobDef.image || jobDef.compose) {
+          // image: and compose: job types require a Docker daemon socket.
+          // This runner uses buildkitd only — there is no daemon. Use `uses: image` instead.
+          if (runnerConfig.buildkit_addr) {
+            throw new Error(
+              `job "${jobName}": image: and compose: jobs require a Docker daemon, but this runner is buildkitd-only (buildkit_addr is set). ` +
+              `Use \`uses: image\` for container builds.`,
+            );
+          }
+          exitCode = await runDockerJob(jobDef, { jobName, worktree, secrets: jobSecrets, meshVars, onLog });
         } else {
           exitCode = await runDockerJob(jobDef, {
             jobName,

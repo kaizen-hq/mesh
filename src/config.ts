@@ -46,6 +46,7 @@ export const DEFAULT_RUNNER: RunnerConfig = {
   log_retention_runs: 50,
   buildkit_addr: "",
   registry_url: "",
+  buildx_builder: "ci-builder",
 };
 
 const KNOWN_TOP_LEVEL = new Set(["self", "peers", "transport", "runner"]);
@@ -54,7 +55,7 @@ const KNOWN_TRANSPORT = new Set(["tls", "poll_secs"]);
 const KNOWN_RUNNER = new Set([
   "enabled", "labels", "max_concurrent_jobs",
   "workdir", "tools", "log_stream_interval_ms", "max_worktree_age_minutes",
-  "max_worktree_disk_mb", "log_retention_runs", "buildkit_addr", "registry_url",
+  "max_worktree_disk_mb", "log_retention_runs", "buildkit_addr", "registry_url", "buildx_builder",
 ]);
 const KNOWN_PEER = new Set(["name", "pubkey", "addresses", "address"]);
 
@@ -131,6 +132,7 @@ export async function loadConfig(file: string): Promise<Config> {
       typeof rr.log_retention_runs === "number" ? rr.log_retention_runs : DEFAULT_RUNNER.log_retention_runs,
     buildkit_addr: typeof rr.buildkit_addr === "string" ? rr.buildkit_addr : DEFAULT_RUNNER.buildkit_addr,
     registry_url: typeof rr.registry_url === "string" ? rr.registry_url : DEFAULT_RUNNER.registry_url,
+    buildx_builder: typeof rr.buildx_builder === "string" ? rr.buildx_builder : DEFAULT_RUNNER.buildx_builder,
   };
 
   return {

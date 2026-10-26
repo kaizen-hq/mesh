@@ -61,7 +61,9 @@ function makeRunnerConfig(workdir: string, overrides: Partial<RunnerConfig> = {}
     max_worktree_age_minutes: 60,
     max_worktree_disk_mb: 512,
     log_retention_runs: 10,
-    git_url: "",
+    buildkit_addr: "",
+    registry_url: "",
+    buildx_builder: "ci-builder",
     ...overrides,
   };
 }
