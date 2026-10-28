@@ -20,7 +20,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: run tests
-        run: bun run test
+        run: bun test
 
       - name: verify package.json version matches tag
         run: |
