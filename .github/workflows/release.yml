@@ -19,6 +19,9 @@ jobs:
       - name: install dependencies
         run: bun install --frozen-lockfile
 
+      - name: run tests
+        run: bun run test
+
       - name: verify package.json version matches tag
         run: |
           TAG="${{ github.ref_name }}"

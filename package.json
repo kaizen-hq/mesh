@@ -13,9 +13,9 @@
     "typecheck": "tsc --noEmit",
     "build": "bun build src/main.ts --compile --outfile mesh",
     "package": "bun scripts/package.ts",
-    "release": "bun scripts/release.ts",
-    "release:fix": "bun scripts/release.ts fix",
-    "release:breaking": "bun scripts/release.ts breaking"
+    "release": "bun test && bun scripts/release.ts",
+    "release:fix": "bun test && bun scripts/release.ts fix",
+    "release:breaking": "bun test && bun scripts/release.ts breaking"
   },
   "dependencies": {},
   "devDependencies": {

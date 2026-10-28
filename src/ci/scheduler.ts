@@ -437,11 +437,26 @@ async function runLocalPipeline(state: SchedulerCtx, pipeline: Pipeline, run: Pi
   // Initialised here; overwritten by runPipeline unless it throws (in which
   // case the exception propagates and `completed` is never read).
   let completed: PipelineRun = run;
+  const jobSeqs = new Map<string, number>();
   completed = await runPipeline(pipeline, run, {
     root: state.root,
     repoPath: worktreePath,
     runnerConfig: state.config.runner,
     secrets: state.ci.secrets,
+    onLog: async (runId: string, jobName: string, line: string) => {
+      const seq = jobSeqs.get(jobName) ?? 0;
+      jobSeqs.set(jobName, seq + 1);
+      void broadcastCiFrame(state, {
+        type: "CiLog",
+        run_id: runId,
+        repo: run.repo,
+        job: jobName,
+        seq,
+        t: new Date().toISOString(),
+        stream: "stdout",
+        data: line,
+      }).catch(() => {});
+    },
     onRunUpdate: async (updated) => {
       state.ci.setRun(updated);
       state.notifyCiRunChanged(updated.repo, updated.runner, updated.status);
